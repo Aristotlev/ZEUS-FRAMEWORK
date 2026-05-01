@@ -1,0 +1,80 @@
+# Zeus Framework — Hermes Agent Configuration
+# Copy to ~/.hermes/config.yaml and fill in your own values
+
+model:
+  default: YOUR_MODEL_HERE        # e.g. z-ai/glm-5.1
+  provider: openrouter
+  base_url: https://openrouter.ai/api/v1
+  api_mode: chat_completions
+
+fallback_model:
+  provider: openrouter
+  model: deepseek/deepseek-r1
+
+fallback_model_3:
+  provider: openrouter
+  model: anthropic/claude-sonnet-4
+
+toolsets:
+  - hermes-cli
+
+agent:
+  max_turns: 90
+  gateway_timeout: 1800
+  restart_drain_timeout: 60
+  tool_use_enforcement: auto
+  verbose: false
+  reasoning_effort: medium
+
+terminal:
+  backend: local
+  timeout: 180
+  persistent_shell: true
+
+browser:
+  inactivity_timeout: 120
+  command_timeout: 30
+
+checkpoints:
+  enabled: true
+  max_snapshots: 50
+
+compression:
+  enabled: true
+  threshold: 0.5
+  target_ratio: 0.2
+
+display:
+  compact: false
+  personality: default
+  streaming: true
+
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 2200
+  user_char_limit: 1375
+  provider: mnemosyne
+  nudge_interval: 10
+  flush_min_turns: 6
+
+delegation:
+  default_toolsets:
+    - terminal
+    - file
+    - web
+
+skills:
+  external_dirs: []
+
+discord:
+  require_mention: true
+  auto_thread: true
+  reactions: true
+
+approvals:
+  mode: manual
+
+security:
+  redact_secrets: true
+  tirith_enabled: true

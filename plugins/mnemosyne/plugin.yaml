@@ -1,0 +1,4 @@
+name: mnemosyne
+version: 1.0.0
+description: "Local L3 vector memory — Redis cache + pgvector semantic search. Zero cloud deps, fully local."
+author: hermes
