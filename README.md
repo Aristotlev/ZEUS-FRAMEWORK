@@ -2,22 +2,28 @@
 
 A fully local, memory-persistent AI agent framework built on [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Zeus adds soul — a 4-layer memory architecture, vector memory plugin, distributed execution, and a battle-tested stack that runs entirely on your hardware.
+Zeus adds soul — a 4-layer memory architecture, vector memory plugin, distributed execution, and **automated content creation pipelines** that run entirely on your hardware.
 
 ## What's Inside
 
 ```
 zeus-framework/
-├── core/               # Hermes Agent source (the engine)
-├── stack/              # HermesStack — Redis + pgvector interface
+├── core/                  # Hermes Agent source (the engine)
+├── stack/                 # HermesStack — Redis + pgvector interface
 ├── plugins/
-│   └── mnemosyne/      # L3 vector memory plugin (Redis + pgvector)
-├── skills/             # 73+ procedural skills (L4 memory)
-├── soul/               # SOUL.md — identity, memory architecture, principles
-├── config/             # Config templates (sanitized, no secrets)
-├── memory/             # Memory templates and schemas
-├── scripts/            # Start scripts, setup helpers
-└── setup/              # pgvector setup, deployment guides
+│   └── mnemosyne/        # L3 vector memory plugin (Redis + pgvector)
+├── skills/               # 73+ procedural skills (L4 memory)
+├── soul/                 # SOUL.md — identity, memory architecture, principles
+├── config/               # Config templates (sanitized, no secrets)
+├── memory/               # Memory templates and schemas
+├── scripts/              # Start scripts, setup helpers
+├── setup/                # pgvector setup, deployment guides
+└── content_automation/   # 🆕 Multi-Platform Content Generation System
+    ├── pipelines/        # Article, carousel, video, avatar pipelines
+    ├── orchestrator.py   # AI content planner & scheduler
+    ├── enhanced_content_ideas.py  # Google Workspace + market crawling
+    ├── docker-compose.yml  # Full Docker deployment
+    └── monitor.py        # Real-time dashboard & cost tracking
 ```
 
 ## Memory Architecture
@@ -67,6 +73,55 @@ pip install -e .
 ```bash
 hermes  # CLI mode
 hermes gateway  # Discord/Telegram/Slack gateway
+
+# Content automation system
+cd content_automation/
+./docker-zeus.sh up  # Start full content pipeline
+```
+
+## 🎬 Content Automation System
+
+**Generate professional financial content at scale - $85/month vs $5000+ competitors spend**
+
+### **5 Content Types, Full Automation:**
+- **📄 Articles** ($0.22 each) → SEO-optimized + hero images + publishing
+- **🎠 Carousels** ($0.71 each) → Data visualization + multi-slide content  
+- **🎬 Videos** ($0.49 each) → Short-form + voiceover + thumbnails
+- **🧑‍💼 Avatar Videos** ($0.137 each) → Professional presenter + backgrounds *(60 min/month FREE)*
+- **🚨 Alerts** ($0.06 each) → Breaking news + congressional trades + market moves
+
+### **3 Content Discovery Sources:**
+1. **📂 File System Drops** → Screenshots, links, notes analyzed daily
+2. **📊 Google Sheets Integration** → Live collaboration + structured input  
+3. **🌐 Automated Market Crawling** → 8 markets, congressional trades, RSS feeds
+
+### **Cost-Optimized Media Stack:**
+- **🤖 LLM:** DeepSeek V4 via OpenRouter ($3.50/month)
+- **🎨 Images:** fal.ai Flux Pro/Schnell + Ideogram 2.0 ($65/month)
+- **🎙️ Voice:** Fish Audio API ($0.75/month) - *98% cheaper than ElevenLabs*
+- **🧑‍💼 Avatars:** Vidnoz FREE tier (60 min/month) - *$0 vs $24/month HeyGen*
+- **📱 Publishing:** Publer API to all platforms ($0/month)
+
+**Result:** Professional content creation at **$0.31/piece** vs competitors' **$16.67+/piece**
+
+### **Quick Start - Content System:**
+```bash
+cd content_automation/
+
+# 1. Setup environment
+cp .env.example .env
+# Edit .env with your API keys
+
+# 2. Setup Google Workspace integration (optional)
+./setup_google_workspace.sh
+
+# 3. Setup content ideas folders
+./setup_content_ideas.sh
+
+# 4. Start the full pipeline
+./docker-zeus.sh up
+
+# 5. Monitor at http://localhost:8080/monitor
 ```
 
 ## Skills (L4 Memory)
