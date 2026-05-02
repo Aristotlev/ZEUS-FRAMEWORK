@@ -21,10 +21,11 @@ zeus-framework/
 │   ├── skills/         # 20+ OpenClaw skills (coding, Discord, Slack, etc.)
 │   ├── docs/           # Documentation
 │   └── scripts/        # Setup and utility scripts
-├── stack/              # HermesStack — Redis + pgvector interface
+├── stack/              # Redis + pgvector interface (HermesStack)
+│   └── hermes_stack.py # Unified cache + vector store client
 ├── plugins/
 │   └── mnemosyne/      # L3 vector memory plugin (Redis + pgvector)
-├── skills/             # 73+ procedural skills (L4 memory)
+├── skills/             # 93+ procedural skills (L4 memory)
 ├── soul/               # Standalone soul reference
 │   └── SOUL.md         # ← Same as core/SOUL.md (shared)
 ├── config/             # Config templates (sanitized, no secrets)
