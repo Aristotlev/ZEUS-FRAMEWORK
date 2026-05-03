@@ -12,18 +12,19 @@ zeus-framework/
 ├── stack/                 # HermesStack — Redis + pgvector interface
 ├── plugins/
 │   └── mnemosyne/        # L3 vector memory plugin (Redis + pgvector)
-├── skills/               # 73+ procedural skills (L4 memory)
+├── skills/               # 95+ procedural skills (L4 memory)
 ├── soul/                 # SOUL.md — identity, memory architecture, principles
 ├── config/               # Config templates (sanitized, no secrets)
 ├── memory/               # Memory templates and schemas
 ├── scripts/              # Start scripts, setup helpers
 ├── setup/                # pgvector setup, deployment guides
-└── content_automation/   # 🆕 Multi-Platform Content Generation System
-    ├── pipelines/        # Article, carousel, video, avatar pipelines
-    ├── orchestrator.py   # AI content planner & scheduler
-    ├── enhanced_content_ideas.py  # Google Workspace + market crawling
-    ├── docker-compose.yml  # Full Docker deployment
-    └── monitor.py        # Real-time dashboard & cost tracking
+├── content_automation/   # 🆕 Multi-Platform Content Generation System
+    │    ├── architecture/     # Content pipeline architecture & cost analysis
+    │    ├── pipelines/        # Article, carousel, video, avatar pipelines
+    │    ├── orchestrator.py   # AI content planner & scheduler
+    │    ├── enhanced_content_ideas.py  # Google Workspace + market crawling
+    │    ├── docker-compose.yml  # Full Docker deployment
+    │    └── monitor.py        # Real-time dashboard & cost tracking
 ```
 
 ## Memory Architecture
@@ -126,13 +127,13 @@ cp .env.example .env
 
 ## Skills (L4 Memory)
 
-73+ skills across domains:
+95+ skills across domains:
 
 - **autonomous-ai-agents** — Claude Code, Codex, OpenCode, subagent delegation
 - **creative** — ASCII art, diagrams, infographics, Excalidraw, pixel art
 - **data-science** — Jupyter live kernel
-- **devops** — Remote access, pgvector setup, webhooks
-- **email** — Himalaya IMAP/SMTP
+- **devops** — Remote access, pgvector setup, webhooks, Wake-on-LAN system
+- **email** — Himalaya IMAP/SMTP, multi-backend email system (AgentMail, Gmail, Proton, Resend/SendGrid)
 - **gaming** — Minecraft modpack servers, Pokemon
 - **github** — Auth, code review, issues, PRs, repo management
 - **mcp** — Model Context Protocol client
@@ -140,7 +141,7 @@ cp .env.example .env
 - **mlops** — HuggingFace, evaluation, inference, training, research
 - **productivity** — Google Workspace, Notion, PDFs, PowerPoint
 - **red-teaming** — LLM jailbreak techniques
-- **research** — arXiv, blog monitoring, prediction markets
+- **research** — arXiv, blog monitoring, prediction markets, competitive analysis
 - **smart-home** — Philips Hue
 - **social-media** — X/Twitter
 - **software-development** — Planning, TDD, debugging, code review
