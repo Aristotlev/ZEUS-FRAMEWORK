@@ -2026,7 +2026,7 @@ def _model_flow_openrouter(config, current_model=""):
 
     from hermes_cli.models import model_ids, get_pricing_for_provider
 
-    openrouter_models = model_ids(force_refresh=True)
+    openrouter_models = model_ids(force_refresh=True, api_key=api_key or get_env_value("OPENROUTER_API_KEY") or "")
 
     # Fetch live pricing (non-blocking — returns empty dict on failure)
     pricing = get_pricing_for_provider("openrouter", force_refresh=True)

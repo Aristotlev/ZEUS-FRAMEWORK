@@ -63,6 +63,45 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("arcee-ai/trinity-large-thinking",  ""),
     ("openai/gpt-5.4-pro",              ""),
     ("openai/gpt-5.4-nano",             ""),
+    # Extended fallback — shown when live catalog fetch fails
+    ("anthropic/claude-3-7-sonnet",     ""),
+    ("anthropic/claude-3-5-sonnet",     ""),
+    ("anthropic/claude-3-5-haiku",      ""),
+    ("anthropic/claude-3-opus",         ""),
+    ("openai/gpt-4o",                   ""),
+    ("openai/gpt-4o-mini",              ""),
+    ("openai/o3",                       ""),
+    ("openai/o3-mini",                  ""),
+    ("openai/o4-mini",                  ""),
+    ("google/gemini-2.5-pro-preview",   ""),
+    ("google/gemini-2.5-flash-preview", ""),
+    ("google/gemini-2.0-flash-001",     ""),
+    ("google/gemini-flash-1.5",         "free"),
+    ("meta-llama/llama-4-maverick",     ""),
+    ("meta-llama/llama-4-scout",        ""),
+    ("meta-llama/llama-3.3-70b-instruct", ""),
+    ("meta-llama/llama-3.1-405b-instruct", ""),
+    ("deepseek/deepseek-r1",            ""),
+    ("deepseek/deepseek-chat-v3-0324",  ""),
+    ("deepseek/deepseek-r1:free",       "free"),
+    ("deepseek/deepseek-chat:free",     "free"),
+    ("qwen/qwen-2.5-72b-instruct",      ""),
+    ("qwen/qwen-2.5-coder-32b-instruct", ""),
+    ("qwen/qwen3-235b-a22b",            ""),
+    ("qwen/qwen3-30b-a3b:free",         "free"),
+    ("mistralai/mistral-large",         ""),
+    ("mistralai/mistral-medium-3",      ""),
+    ("mistralai/mistral-small-3.1-24b-instruct:free", "free"),
+    ("mistralai/devstral-small:free",   "free"),
+    ("x-ai/grok-3-beta",                ""),
+    ("x-ai/grok-3-mini-beta",           ""),
+    ("cohere/command-a",                ""),
+    ("cohere/command-r-plus",           ""),
+    ("microsoft/phi-4",                 ""),
+    ("microsoft/phi-4-reasoning-plus",  ""),
+    ("nousresearch/hermes-3-llama-3.1-405b", ""),
+    ("perplexity/sonar-reasoning-pro",  ""),
+    ("perplexity/sonar-pro",            ""),
 ]
 
 _openrouter_catalog_cache: list[tuple[str, str]] | None = None
@@ -691,6 +730,7 @@ def fetch_openrouter_models(
     timeout: float = 8.0,
     *,
     force_refresh: bool = False,
+    api_key: str = "",
 ) -> list[tuple[str, str]]:
     """Return the curated OpenRouter picker list, refreshed from the live catalog when possible."""
     global _openrouter_catalog_cache
@@ -702,9 +742,20 @@ def fetch_openrouter_models(
     preferred_ids = [mid for mid, _ in fallback]
 
     try:
+        headers: dict[str, str] = {"Accept": "application/json"}
+        # Passing the API key unlocks the full model catalog (including private/beta models).
+        _key = api_key
+        if not _key:
+            try:
+                from hermes_cli.config import get_env_value as _gev
+                _key = _gev("OPENROUTER_API_KEY") or ""
+            except Exception:
+                pass
+        if _key:
+            headers["Authorization"] = f"Bearer {_key}"
         req = urllib.request.Request(
             "https://openrouter.ai/api/v1/models",
-            headers={"Accept": "application/json"},
+            headers=headers,
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode())
@@ -753,9 +804,9 @@ def fetch_openrouter_models(
     return list(all_models)
 
 
-def model_ids(*, force_refresh: bool = False) -> list[str]:
+def model_ids(*, force_refresh: bool = False, api_key: str = "") -> list[str]:
     """Return just the OpenRouter model-id strings."""
-    return [mid for mid, _ in fetch_openrouter_models(force_refresh=force_refresh)]
+    return [mid for mid, _ in fetch_openrouter_models(force_refresh=force_refresh, api_key=api_key)]
 
 
 def _ai_gateway_model_is_free(pricing: Any) -> bool:
