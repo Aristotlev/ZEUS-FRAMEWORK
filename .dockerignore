@@ -1,0 +1,39 @@
+# Zeus Framework — Docker build context ignore
+# Keeps the build context small by excluding non-essential files.
+
+# Git
+.git
+.gitignore
+.gitmodules
+
+# Node dependencies (reinstalled inside Docker)
+**/node_modules
+core/node_modules
+core/web/node_modules
+
+# Python artifacts
+**/__pycache__
+**/*.pyc
+**/*.pyo
+core/.venv
+core/venv
+
+# Environment secrets
+.env
+**/.env
+
+# Volatile / large directories not needed at build time
+core/hermes_agent.egg-info
+core/tests
+core/.claude
+.claude
+
+# OS artifacts
+.DS_Store
+**/.DS_Store
+Thumbs.db
+
+# Editor
+.vscode
+*.swp
+*.swo

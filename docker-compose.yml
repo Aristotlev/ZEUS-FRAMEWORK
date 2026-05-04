@@ -1,0 +1,90 @@
+services:
+
+  # ── Redis — L2 cache + task queue ────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: zeus-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - zeus-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - zeus-net
+
+  # ── PostgreSQL 16 + pgvector — L3 semantic memory ────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: zeus-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hermes_vectors}
+      POSTGRES_USER: ${POSTGRES_USER:-hermes}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hermes_local}
+    volumes:
+      - zeus-pg-data:/var/lib/postgresql/data
+      - ./docker/init_pgvector.sql:/docker-entrypoint-initdb.d/init_pgvector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hermes} -d ${POSTGRES_DB:-hermes_vectors}"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    networks:
+      - zeus-net
+
+  # ── Zeus Agent ────────────────────────────────────────────────────────────
+  zeus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: zeus
+    image: zeus-framework:latest
+    container_name: zeus-agent
+    restart: "no"          # Interactive — don't auto-restart
+    stdin_open: true
+    tty: true
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      # Required: set in your .env file
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      ZEUS_MODEL: ${ZEUS_MODEL:-anthropic/claude-sonnet-4}
+      # Service discovery (container names resolve via zeus-net)
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-hermes_vectors}
+      POSTGRES_USER: ${POSTGRES_USER:-hermes}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hermes_local}
+      HERMES_HOME: /opt/data
+      ZEUS_DIR: /opt/zeus
+      # Match host UID to avoid permission issues with the data volume
+      HERMES_UID: ${HERMES_UID:-1000}
+    volumes:
+      # Persistent agent data (memory, config, sessions, skills)
+      - zeus-hermes-data:/opt/data
+      # Live-reload Zeus skills without rebuild
+      - ./skills:/opt/zeus/skills:ro
+      # Live-reload Mnemosyne plugin without rebuild
+      - ./plugins/mnemosyne:/opt/zeus/plugins/mnemosyne:ro
+      # Live-reload soul persona
+      - ./soul/SOUL.md:/opt/zeus/SOUL.md:ro
+    networks:
+      - zeus-net
+
+volumes:
+  zeus-redis-data:
+  zeus-pg-data:
+  zeus-hermes-data:
+
+networks:
+  zeus-net:
+    driver: bridge
