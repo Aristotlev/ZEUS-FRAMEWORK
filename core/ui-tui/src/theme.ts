@@ -79,11 +79,11 @@ function mix(a: string, b: string, t: number) {
 // ── Defaults ─────────────────────────────────────────────────────────
 
 const BRAND: ThemeBrand = {
-  name: 'Hermes Agent',
-  icon: '⚕',
+  name: 'Zeus',
+  icon: '⚡',
   prompt: '❯',
   welcome: 'Type your message or /help for commands.',
-  goodbye: 'Goodbye! ⚕',
+  goodbye: 'Goodbye! ⚡',
   tool: '┊',
   helpHeader: '(^_^)? Commands'
 }

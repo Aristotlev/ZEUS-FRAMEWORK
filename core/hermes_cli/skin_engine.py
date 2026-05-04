@@ -155,7 +155,7 @@ class SkinConfig:
 _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
     "default": {
         "name": "default",
-        "description": "Classic Hermes — gold and kawaii",
+        "description": "Zeus — gold and thunder",
         "colors": {
             "banner_border": "#CD7F32",
             "banner_title": "#FFD700",
@@ -177,14 +177,36 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             # Empty = use hardcoded defaults in display.py
         },
         "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
+            "agent_name": "Zeus",
+            "welcome": "Welcome to Zeus! Type your message or /help for commands.",
+            "goodbye": "Goodbye! ⚡",
+            "response_label": " ⚡ Zeus ",
             "prompt_symbol": "❯ ",
             "help_header": "(^_^)? Available Commands",
         },
         "tool_prefix": "┊",
+        "banner_logo": """[bold #FFD700]     ███████╗███████╗██╗   ██╗███████╗[/]
+[bold #FFD700]     ╚══███╔╝██╔════╝██║   ██║██╔════╝[/]
+[#FFBF00]       ███╔╝ █████╗  ██║   ██║███████╗[/]
+[#FFBF00]      ███╔╝  ██╔══╝  ██║   ██║╚════██║[/]
+[#CD7F32]     ███████╗███████╗╚██████╔╝███████║[/]
+[#CD7F32]     ╚══════╝╚══════╝ ╚═════╝ ╚══════╝[/]
+[bold #FFD700]              ⚡  ZEUS  ⚡[/]""",
+        "banner_hero": """[#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⣴⣾⣿⣿⡟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[#FFD700]⠀⠀⠀⠀⠀⠀⠀⢀⣤⣾⣿⣿⣿⣿⠟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[#FFBF00]⠀⠀⠀⠀⠀⣠⣾⣿⣿⣿⣿⡿⠛⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[#FFBF00]⠀⠀⠀⣠⣾⣿⣿⣿⣿⡿⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[#FFBF00]⠀⣀⣾⣿⣿⣿⣿⠟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[#FFD700]⠀⣿⣿⣿⡿⠛⠁⠀⠀⢀⣠⣴⣶⣶⣶⣶⣦⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[#FFD700]⠀⠹⠟⠁⠀⠀⠀⢀⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣦⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[#CD7F32]⠀⠀⠀⠀⠀⢀⣾⣿⣿⣿⣿⠟⠉⠉⠙⢿⣿⣿⣿⣿⣿⣦⡀⠀⠀⠀⠀⠀⠀⠀[/]
+[#CD7F32]⠀⠀⠀⠀⠀⣿⣿⣿⣿⠟⠀⠀⠀⠀⠀⠀⠻⣿⣿⣿⣿⣿⣿⣄⠀⠀⠀⠀⠀⠀[/]
+[#CD7F32]⠀⠀⠀⠀⠀⠹⣿⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠙⣿⣿⣿⣿⣿⣿⣷⣄⠀⠀⠀⠀[/]
+[#B8860B]⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠿⣿⣿⣿⣿⣿⣷⣄⠀⠀[/]
+[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿⣿⣿⣷⡄[/]
+[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿⣿⣿[/]
+[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿⣿⠃[/]
+[dim #B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⚡ zeus online ⚡⠀⠀⠀⠀⠀[/]""",
     },
     "ares": {
         "name": "ares",
@@ -272,10 +294,10 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
+            "agent_name": "Zeus",
+            "welcome": "Welcome to Zeus! Type your message or /help for commands.",
+            "goodbye": "Goodbye! ⚡",
+            "response_label": " ⚡ Zeus ",
             "prompt_symbol": "❯ ",
             "help_header": "[?] Available Commands",
         },
@@ -303,10 +325,10 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
+            "agent_name": "Zeus",
+            "welcome": "Welcome to Zeus! Type your message or /help for commands.",
+            "goodbye": "Goodbye! ⚡",
+            "response_label": " ⚡ Zeus ",
             "prompt_symbol": "❯ ",
             "help_header": "(^_^)? Available Commands",
         },
@@ -340,10 +362,10 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! ⚕",
-            "response_label": " ⚕ Hermes ",
+            "agent_name": "Zeus",
+            "welcome": "Welcome to Zeus! Type your message or /help for commands.",
+            "goodbye": "Goodbye! ⚡",
+            "response_label": " ⚡ Zeus ",
             "prompt_symbol": "❯ ",
             "help_header": "[?] Available Commands",
         },
@@ -377,14 +399,14 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-            "goodbye": "Goodbye! \u2695",
-            "response_label": " \u2695 Hermes ",
-            "prompt_symbol": "\u276f ",
+            "agent_name": "Zeus",
+            "welcome": "Welcome to Zeus! Type your message or /help for commands.",
+            "goodbye": "Goodbye! ⚡",
+            "response_label": " ⚡ Zeus ",
+            "prompt_symbol": "❯ ",
             "help_header": "(^_^)? Available Commands",
         },
-        "tool_prefix": "\u250a",
+        "tool_prefix": "┊",
     },
     "poseidon": {
         "name": "poseidon",

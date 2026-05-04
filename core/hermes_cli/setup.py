@@ -2858,7 +2858,7 @@ def run_setup_wizard(args):
     )
     print(
         color(
-            "│             ⚕ Hermes Agent Setup Wizard                │", Colors.MAGENTA
+            "│               ⚡ Zeus Setup Wizard                     │", Colors.MAGENTA
         )
     )
     print(
@@ -2869,7 +2869,7 @@ def run_setup_wizard(args):
     )
     print(
         color(
-            "│  Let's configure your Hermes Agent installation.       │", Colors.MAGENTA
+            "│  Let's configure your Zeus installation.               │", Colors.MAGENTA
         )
     )
     print(
@@ -2890,7 +2890,7 @@ def run_setup_wizard(args):
         # ── Returning User Menu ──
         print()
         print_header("Welcome Back!")
-        print_success("You already have Hermes configured.")
+        print_success("You already have Zeus configured.")
         print()
 
         menu_choices = [

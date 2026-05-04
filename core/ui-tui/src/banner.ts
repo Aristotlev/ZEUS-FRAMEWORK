@@ -44,12 +44,13 @@ export function parseRichMarkup(markup: string): Line[] {
 }
 
 const LOGO_ART = [
-  '██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗',
-  '██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝',
-  '███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ',
-  '██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ',
-  '██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ',
-  '╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   '
+  '     ███████╗███████╗██╗   ██╗███████╗',
+  '     ╚══███╔╝██╔════╝██║   ██║██╔════╝',
+  '       ███╔╝ █████╗  ██║   ██║███████╗',
+  '      ███╔╝  ██╔══╝  ██║   ██║╚════██║',
+  '     ███████╗███████╗╚██████╔╝███████║',
+  '     ╚══════╝╚══════╝ ╚═════╝ ╚══════╝',
+  '              ⚡  ZEUS  ⚡             ',
 ]
 
 const CADUCEUS_ART = [
@@ -70,7 +71,7 @@ const CADUCEUS_ART = [
   '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀'
 ]
 
-const LOGO_GRADIENT = [0, 0, 1, 1, 2, 2] as const
+const LOGO_GRADIENT = [0, 0, 1, 1, 2, 2, 0] as const
 const CADUC_GRADIENT = [2, 2, 1, 1, 0, 0, 1, 1, 2, 2, 3, 3, 3, 3, 3] as const
 
 const colorize = (art: string[], gradient: readonly number[], c: ThemeColors): Line[] => {
@@ -79,7 +80,7 @@ const colorize = (art: string[], gradient: readonly number[], c: ThemeColors): L
   return art.map((text, i) => [p[gradient[i]!] ?? c.dim, text])
 }
 
-export const LOGO_WIDTH = 98
+export const LOGO_WIDTH = 42
 export const CADUCEUS_WIDTH = 30
 
 export const logo = (c: ThemeColors, customLogo?: string): Line[] =>
