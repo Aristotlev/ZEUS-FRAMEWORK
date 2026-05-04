@@ -25,14 +25,13 @@ zeus-framework/
 │   └── hermes_stack.py # Unified cache + vector store client
 ├── plugins/
 │   └── mnemosyne/      # L3 vector memory plugin (Redis + pgvector)
-├── content_automation/   # 🆕 Multi-Platform Content Generation System
 │   ├── architecture/     # Pipeline architecture & cost analysis
 │   ├── pipelines/        # Article, carousel, video, avatar pipelines
 │   ├── orchestrator.py   # AI content planner & scheduler
 │   ├── enhanced_content_ideas.py  # Google Workspace + market crawling
 │   ├── docker-compose.yml  # Full Docker deployment
 │   └── monitor.py        # Real-time dashboard & cost tracking
-├── skills/             # 95+ procedural skills (L4 memory)
+├── skills/             # 98+ skills (L4 memory)
 ├── soul/               # Standalone soul reference
 │   └── SOUL.md         # ← Same as core/SOUL.md (shared)
 ├── config/             # Config templates (sanitized, no secrets)

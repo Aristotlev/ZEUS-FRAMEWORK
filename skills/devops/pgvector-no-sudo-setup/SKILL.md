@@ -28,7 +28,7 @@ Key: Must set `unix_socket_directories` to a writable path (default `/var/run/po
 
 ### 2. Create user and database
 ```bash
-psql -h ~/pgdata -p 5433 -U $USER -d postgres -c "CREATE USER hermes WITH PASSWORD 'hermes_unstoppable';"
+psql -h ~/pgdata -p 5433 -U $USER -d postgres -c "CREATE USER hermes WITH PASSWORD 'your_db_password';"
 psql -h ~/pgdata -p 5433 -U $USER -d postgres -c "CREATE DATABASE hermes_vectors OWNER hermes;"
 ```
 
