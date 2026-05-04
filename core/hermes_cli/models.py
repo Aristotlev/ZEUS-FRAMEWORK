@@ -33,6 +33,7 @@ COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 # (model_id, display description shown in menus)
 OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("moonshotai/kimi-k2.6",            "recommended"),
+    ("deepseek/deepseek-v4-pro",        ""),
     ("anthropic/claude-opus-4.7",       ""),
     ("anthropic/claude-opus-4.6",       ""),
     ("anthropic/claude-sonnet-4.6",     ""),
@@ -81,6 +82,7 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("meta-llama/llama-4-scout",        ""),
     ("meta-llama/llama-3.3-70b-instruct", ""),
     ("meta-llama/llama-3.1-405b-instruct", ""),
+    ("deepseek/deepseek-v4-pro",        ""),
     ("deepseek/deepseek-r1",            ""),
     ("deepseek/deepseek-chat-v3-0324",  ""),
     ("deepseek/deepseek-r1:free",       "free"),
@@ -146,6 +148,7 @@ def _codex_curated_models() -> list[str]:
 _PROVIDER_MODELS: dict[str, list[str]] = {
     "nous": [
         "moonshotai/kimi-k2.6",
+        "deepseek/deepseek-v4-pro",
         "xiaomi/mimo-v2-pro",
         "anthropic/claude-opus-4.7",
         "anthropic/claude-opus-4.6",
