@@ -35,8 +35,8 @@ _HERMES_CORE_TOOLS = [
     "terminal", "process",
     # File manipulation
     "read_file", "write_file", "patch", "search_files",
-    # Vision + image generation
-    "vision_analyze", "image_generate",
+    # Vision + image/video/music generation
+    "vision_analyze", "image_generate", "video_generate", "music_generate",
     # Skills
     "skills_list", "skill_view", "skill_manage",
     # Browser automation
@@ -88,6 +88,18 @@ TOOLSETS = {
     "image_gen": {
         "description": "Creative generation tools (images)",
         "tools": ["image_generate"],
+        "includes": []
+    },
+
+    "video_gen": {
+        "description": "Video generation via fal.ai (Kling 2.5 Turbo Pro text-to-video and image-to-video)",
+        "tools": ["video_generate"],
+        "includes": []
+    },
+
+    "music_gen": {
+        "description": "Music generation via fal.ai (CassetteAI, Stable Audio)",
+        "tools": ["music_generate"],
         "includes": []
     },
     
@@ -266,8 +278,8 @@ TOOLSETS = {
             "terminal", "process",
             # File manipulation
             "read_file", "write_file", "patch", "search_files",
-            # Vision + image generation
-            "vision_analyze", "image_generate",
+            # Vision + image/video/music generation
+            "vision_analyze", "image_generate", "video_generate", "music_generate",
             # Skills
             "skills_list", "skill_view", "skill_manage",
             # Browser automation
