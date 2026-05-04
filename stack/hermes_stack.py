@@ -4,6 +4,7 @@ Hermes Unstoppable Stack — Vector Store + Cache Interface
 Provides unified access to Redis (caching) and pgvector (semantic search)
 """
 
+import os
 import redis
 import psycopg2
 import psycopg2.extras
@@ -12,14 +13,14 @@ import json
 from typing import List, Dict, Any, Optional
 from contextlib import contextmanager
 
-# Connection settings
-REDIS_URL = "redis://127.0.0.1:6379"
+# Connection settings — prefer env vars, fall back to defaults
+REDIS_URL = os.environ.get("MNEMOSYNE_REDIS_URL", "redis://127.0.0.1:6379")
 PG_URL = {
-    "host": "127.0.0.1",
-    "port": 5433,
-    "database": "hermes_vectors",
-    "user": "hermes",
-    "password": "your_db_password"
+    "host": os.environ.get("MNEMOSYNE_PG_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("MNEMOSYNE_PG_PORT", "5432")),
+    "database": os.environ.get("MNEMOSYNE_PG_DB", "hermes_vectors"),
+    "user": os.environ.get("MNEMOSYNE_PG_USER", "hermes"),
+    "password": os.environ.get("MNEMOSYNE_PG_PASSWORD", "hermes_unstoppable"),
 }
 
 class HermesStack:
