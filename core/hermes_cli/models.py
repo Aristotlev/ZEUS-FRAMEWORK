@@ -728,17 +728,29 @@ def fetch_openrouter_models(
     for preferred_id in preferred_ids:
         live_item = live_by_id.get(preferred_id)
         if live_item is None:
+            # Still include curated model even if not yet in live catalog
+            curated.append((preferred_id, ""))
             continue
         desc = "free" if _openrouter_model_is_free(live_item.get("pricing")) else ""
         curated.append((preferred_id, desc))
 
-    if not curated:
+    # Append ALL remaining live models not already in the curated list
+    curated_ids = {mid for mid, _ in curated}
+    extra: list[tuple[str, str]] = []
+    for mid, item in sorted(live_by_id.items()):
+        if mid in curated_ids:
+            continue
+        desc = "free" if _openrouter_model_is_free(item.get("pricing")) else ""
+        extra.append((mid, desc))
+    all_models = curated + extra
+
+    if not all_models:
         return list(_openrouter_catalog_cache or fallback)
 
-    first_id, _ = curated[0]
-    curated[0] = (first_id, "recommended")
-    _openrouter_catalog_cache = curated
-    return list(curated)
+    first_id, _ = all_models[0]
+    all_models[0] = (first_id, "recommended")
+    _openrouter_catalog_cache = all_models
+    return list(all_models)
 
 
 def model_ids(*, force_refresh: bool = False) -> list[str]:
