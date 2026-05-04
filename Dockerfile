@@ -41,16 +41,24 @@ RUN npm install --prefer-offline --no-audit && \
     (cd web && npm install --prefer-offline --no-audit) && \
     npm cache clean --force
 
-# Hermes source
+# Python deps layer — copy only the metadata files first so this layer is
+# cached across pure source-code changes (models.py, skills, etc.)
+COPY --chown=hermes:hermes core/pyproject.toml core/requirements.txt* ./
+RUN chown hermes:hermes /opt/hermes
+USER hermes
+RUN uv venv /opt/hermes/.venv && \
+    uv pip install --no-cache-dir --python /opt/hermes/.venv/bin/python ".[all]" 2>/dev/null || true
+USER root
+
+# Hermes source (cache-bust only invalidates the install step below, not npm)
 COPY --chown=hermes:hermes core/ .
 
 # Build web dashboard
 RUN cd web && npm run build
 
-# Python venv
-RUN chown hermes:hermes /opt/hermes
+# Final editable install (fast — deps already in venv, just creates .pth link)
 USER hermes
-RUN uv venv && uv pip install --no-cache-dir -e ".[all]"
+RUN uv pip install --no-cache-dir --python /opt/hermes/.venv/bin/python -e ".[all]"
 
 # ── Stage 2: Zeus layer (adds skills, plugins, soul) ─────────────────────────
 FROM hermes_base AS zeus

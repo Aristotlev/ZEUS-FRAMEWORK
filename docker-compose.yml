@@ -49,9 +49,9 @@ services:
     tty: true
     depends_on:
       redis:
-        condition: service_healthy
+        condition: service_started
       postgres:
-        condition: service_healthy
+        condition: service_started
     environment:
       # Required: set in your .env file
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
