@@ -102,6 +102,26 @@ TOOLSETS = {
         "tools": ["music_generate"],
         "includes": []
     },
+
+    "content_cron": {
+        "description": "Slim toolset for content automation cron jobs — research, generate, publish. Drops 27 tools (browser, terminal, HA, etc.) to keep system prompt small for fast TTFT in unattended loops.",
+        "tools": [
+            # Research
+            "web_search", "web_extract",
+            # Media generation
+            "image_generate", "video_generate", "music_generate",
+            "vision_analyze",
+            # API calls (Notion, Publer, AgentMail) via Python
+            "execute_code",
+            # Local file I/O for the pipeline
+            "read_file", "write_file", "search_files",
+            # Persistence + planning
+            "memory", "todo",
+            # Parallelism for multi-step pipelines
+            "delegate_task",
+        ],
+        "includes": []
+    },
     
     "terminal": {
         "description": "Terminal/command execution and process management tools",

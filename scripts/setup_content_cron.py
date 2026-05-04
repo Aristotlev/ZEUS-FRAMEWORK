@@ -38,24 +38,42 @@ sys.path.insert(0, str(ROOT / "core"))
 
 from cron.jobs import create_job, list_jobs, remove_job  # noqa: E402
 
+# Default fast model for cron loops. Flagship reasoning models (v4-pro, etc.)
+# are wrong for 20-40 turn agent loops — they cold-start, throttle, and timeout.
+# Override via content_pipeline.cron_model in config.yaml.
+DEFAULT_CRON_MODEL = "deepseek/deepseek-v4-flash"
+DEFAULT_CRON_PROVIDER = "openrouter"
+DEFAULT_CRON_BASE_URL = "https://openrouter.ai/api/v1"
 
-def _load_niche_from_config() -> List[str]:
-    """Read content_pipeline.niche from ~/.hermes/config.yaml. List or string."""
+
+def _load_content_pipeline_section() -> dict:
     try:
         from hermes_cli.config import load_config
         cfg = load_config() or {}
     except Exception:
-        return []
-
+        return {}
     section = cfg.get("content_pipeline") if isinstance(cfg, dict) else None
-    if not isinstance(section, dict):
-        return []
-    raw = section.get("niche")
+    return section if isinstance(section, dict) else {}
+
+
+def _load_niche_from_config() -> List[str]:
+    """Read content_pipeline.niche from ~/.hermes/config.yaml. List or string."""
+    raw = _load_content_pipeline_section().get("niche")
     if isinstance(raw, str):
         return [t.strip() for t in raw.split(",") if t.strip()]
     if isinstance(raw, list):
         return [str(t).strip() for t in raw if str(t).strip()]
     return []
+
+
+def _load_cron_model() -> tuple:
+    """Read content_pipeline.cron_model / provider / base_url from config."""
+    section = _load_content_pipeline_section()
+    return (
+        str(section.get("cron_model") or DEFAULT_CRON_MODEL),
+        str(section.get("cron_provider") or DEFAULT_CRON_PROVIDER),
+        str(section.get("cron_base_url") or DEFAULT_CRON_BASE_URL),
+    )
 
 
 def _format_niche(niche: List[str]) -> str:
@@ -75,97 +93,72 @@ def _resolve_niche(cli_override: str = "") -> List[str]:
     return _load_niche_from_config()
 
 def _build_jobs(niche: List[str]):
-    """Build the three job specs from a list of niche topics."""
+    """Build the three job specs from a list of niche topics.
+
+    Prompts are self-contained — no skill auto-load. The skill SKILL.md
+    files were ~32K each and got injected verbatim into every cron run's
+    system prompt, blowing TTFT past 5 min on flash models. The agent
+    picks up Notion + Publer credentials from env and figures out the
+    HTTP calls via execute_code; the prompt only tells it what to do,
+    not how (the skill / API docs are accessible via skills_list/skill_view
+    if the agent needs them mid-run).
+    """
     phrase = _format_niche(niche)
-    # Search query examples derived from the configured niche, e.g.
-    # ["crypto news today", "stocks news today", ...]
-    search_examples = ", ".join(f'"{t} news today"' for t in niche[:4])
 
-    article_slot = f"""\
-Generate and publish ONE long-form article on the most newsworthy current
-story in {phrase} from the past 4-6 hours.
+    common_outro = (
+        " Use execute_code with the Notion API (env: NOTION_API_KEY, see "
+        "~/.hermes/notion_ids.json) and Publer API (env: PUBLER_API_KEY, "
+        "PUBLER_WORKSPACE_ID, PUBLER_*_ID per platform). Email summary via "
+        "AgentMail (AGENTMAIL_API_KEY). Always include a cost rollup "
+        "(image + LLM tokens + API calls) in the email."
+    )
 
-Workflow:
-1. Web search across the niche for breaking stories (e.g. {search_examples}).
-   Pick the single most newsworthy story not already covered today (check
-   the Notion archive database to avoid duplicates).
-2. Web extract from 2-3 authoritative sources for full context and quotes.
-3. Write a 1200-2000 word long-form article: hook, context, analysis,
-   implications, takeaways. Neutral tone, no hype.
-4. Generate a 16:9 landscape header image with image_generate.
-5. Publish via Publer to LinkedIn (full article), X/Twitter (as a thread),
-   and any other configured long-form platforms in the workspace.
-6. Save the article + image URL + post URLs + cost rollup to the Notion
-   archive database.
-7. Email a one-paragraph summary with the platforms posted to and the
-   total run cost (image + LLM + Publer API calls).
+    article_slot = (
+        f"Generate and publish ONE long-form {phrase} article on the most "
+        f"newsworthy story from the past 4-6h. Skip stories already covered "
+        f"today (check the Notion archive). Write 1200-2000 words. Generate "
+        f"a 16:9 header image. Publish NOW to all configured Publer "
+        f"platforms (don't schedule for later). Archive to Notion. "
+        f"Be decisive — no questions, no back-and-forth."
+        + common_outro
+    )
 
-Use the content-publish-workflow skill for the publishing pipeline.
-"""
+    notion_ideas = (
+        f"Process new team-submitted {phrase} ideas in the Notion content "
+        f"ideas database (entries with no 'processed' tag). For each: "
+        f"research, draft 1200-2000 words, generate a header image, "
+        f"schedule via Publer at the next available slot in today's "
+        f"calendar (08:00/12:00/17:00/21:00/00:00/04:00), then tag the "
+        f"Notion entry 'processed' with links. If zero new ideas, exit "
+        f"immediately with a one-line email — no generation cost."
+        + common_outro
+    )
 
-    notion_ideas = f"""\
-Process new team-submitted content ideas from the Notion content ideas
-database.
-
-Workflow:
-1. Query Notion for entries with status "new" or no "processed" tag.
-2. For each idea: read the title, description, any references the team
-   member attached.
-3. Research the topic via web_search and web_extract for current context.
-4. Draft a long-form article (1200-2000 words) blending the team member's
-   angle with current data and developments in {phrase}.
-5. Generate a 16:9 header image.
-6. Schedule via Publer at the next available slot in today's content
-   calendar (08:00, 12:00, 17:00, 21:00, 00:00, 04:00).
-7. Update the Notion entry: status → "processed", attach the scheduled
-   post URL, the article text, the image URL, and the slot time.
-8. Email a summary listing each idea processed, who submitted it, and
-   when it's scheduled. Include total cost rollup.
-
-If there are no new ideas, exit cleanly with a one-line email saying so
-(no cost spent on generation).
-
-Use the content-publish-workflow skill.
-"""
-
-    daily_crawl = f"""\
-Build today's content brief by crawling the day's top headlines in
-{phrase}.
-
-Workflow:
-1. Web search across the full niche for the past 24h, one query per topic
-   (e.g. {search_examples}).
-2. Identify the 6 most newsworthy stories worth long-form coverage today.
-3. For each story, write a 50-100 word brief: angle, key facts, why it
-   matters, suggested headline.
-4. Save the brief as a single Notion page in the content ideas database
-   tagged "daily-crawl-{{date}}", with each story as a separate row tagged
-   "queued" so the article-slot jobs can pick them up first instead of
-   re-crawling.
-5. Email the daily content brief to the team with all 6 story summaries
-   so editors can override or add to the queue manually.
-
-Use the multi-agent-content-pipeline skill for the planning + brief stage.
-"""
+    daily_crawl = (
+        f"Build today's {phrase} content brief. Crawl the past 24h headlines "
+        f"across the niche, pick the top 6 stories worth long-form coverage, "
+        f"write 50-100 word briefs (angle, key facts, why it matters, "
+        f"suggested headline), save them to the Notion content ideas "
+        f"database tagged 'queued' so article-slot jobs pick them up first. "
+        f"Email the brief to the team for editorial review."
+        + common_outro
+    )
 
     return [
         {
             "name": "zeus-content-article-slot",
             "schedule": "0 0,4,8,12,17,21 * * *",
             "prompt": article_slot,
-            "skills": ["content-publish-workflow"],
         },
         {
             "name": "zeus-content-notion-ideas",
             "schedule": "0 7 * * *",
             "prompt": notion_ideas,
-            "skills": ["content-publish-workflow"],
         },
         {
             "name": "zeus-content-daily-crawl",
             "schedule": "0 6 * * *",
             "prompt": daily_crawl,
-            "skills": ["multi-agent-content-pipeline"],
         },
     ]
 
@@ -191,7 +184,10 @@ def main():
         )
         sys.exit(2)
 
+    cron_model, cron_provider, cron_base_url = _load_cron_model()
+
     print(f"Niche: {_format_niche(niche)}")
+    print(f"Model: {cron_model}  ({cron_provider})")
 
     # Idempotency: nuke existing zeus-content-* jobs so re-running this
     # script reflects the current niche/prompts without leaving duplicates.
@@ -209,8 +205,11 @@ def main():
             name=spec["name"],
             schedule=spec["schedule"],
             prompt=spec["prompt"],
-            skills=spec["skills"],
             deliver="local",
+            model=cron_model,
+            provider=cron_provider,
+            base_url=cron_base_url,
+            toolsets=["content_cron"],  # slim 12-tool toolset for fast TTFT
         )
         print(f"Created {spec['name']:35s}  schedule={spec['schedule']:25s}  id={job['id'][:8]}")
 
