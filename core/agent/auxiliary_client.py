@@ -157,7 +157,7 @@ _PROVIDER_VISION_MODELS: Dict[str, str] = {
 # OpenRouter app attribution headers
 _OR_HEADERS = {
     "HTTP-Referer": "https://hermes-agent.nousresearch.com",
-    "X-OpenRouter-Title": "Hermes Agent",
+    "X-OpenRouter-Title": "Zeus",
     "X-OpenRouter-Categories": "productivity,cli-agent",
 }
 
@@ -167,8 +167,8 @@ from hermes_cli import __version__ as _HERMES_VERSION
 
 _AI_GATEWAY_HEADERS = {
     "HTTP-Referer": "https://hermes-agent.nousresearch.com",
-    "X-Title": "Hermes Agent",
-    "User-Agent": f"HermesAgent/{_HERMES_VERSION}",
+    "X-Title": "Zeus",
+    "User-Agent": f"Zeus/{_HERMES_VERSION}",
 }
 
 # Nous Portal extra_body for product attribution.
@@ -216,7 +216,7 @@ def _codex_cloudflare_headers(access_token: str) -> Dict[str, str]:
     crash at client construction.
     """
     headers = {
-        "User-Agent": "codex_cli_rs/0.0.0 (Hermes Agent)",
+        "User-Agent": "codex_cli_rs/0.0.0 (Zeus)",
         "originator": "codex_cli_rs",
     }
     if not isinstance(access_token, str) or not access_token.strip():

@@ -53,6 +53,21 @@ if ! command -v hermes &>/dev/null; then
 fi
 ok "Hermes found ($(hermes --version 2>/dev/null || echo 'version unknown'))"
 
+# ── Add `zeus` command alongside existing `hermes` ────────────────────────────
+HERMES_PATH="$(command -v hermes)"
+HERMES_BIN_DIR="$(dirname "$HERMES_PATH")"
+if [[ -w "$HERMES_BIN_DIR" ]]; then
+    if [[ ! -e "$HERMES_BIN_DIR/zeus" ]]; then
+        ln -sf "$HERMES_PATH" "$HERMES_BIN_DIR/zeus"
+        ok "Symlinked zeus → $HERMES_BIN_DIR/zeus (same binary as hermes)"
+    else
+        ok "zeus command already present at $HERMES_BIN_DIR/zeus"
+    fi
+else
+    warn "Can't write to $HERMES_BIN_DIR — skipping zeus symlink. Use 'hermes' for now."
+    warn "To add zeus manually: sudo ln -sf $HERMES_PATH $HERMES_BIN_DIR/zeus"
+fi
+
 # ── Step 1: Clone or update Zeus repo ────────────────────────────────────────
 info "Syncing Zeus repository..."
 if [[ -d "$ZEUS_LOCAL/.git" ]]; then
@@ -222,11 +237,20 @@ echo -e "${BOLD}${GREEN}  ⚡ Upgrade complete!${NC}"
 echo -e "${BOLD}${GREEN}════════════════════════════════════════${NC}"
 echo ""
 echo -e "  ${BOLD}Zeus installed at:${NC} $ZEUS_LOCAL"
-echo -e "  ${BOLD}Hermes home:${NC}      $HERMES_HOME"
+echo -e "  ${BOLD}Config home:${NC}      $HERMES_HOME"
 echo ""
-echo -e "  Restart Hermes to activate Zeus:"
+echo -e "  ${BOLD}What changed:${NC}"
+echo -e "    ${GREEN}✓${NC} CLI rebranded to Zeus (banner, prompts, status, gateway)"
+echo -e "    ${GREEN}✓${NC} New ${BOLD}zeus${NC} command (legacy ${BOLD}hermes${NC} still works)"
+echo -e "    ${GREEN}✓${NC} Zeus soul persona activated"
+echo -e "    ${GREEN}✓${NC} Mnemosyne L3 memory plugin installed"
+echo -e "    ${GREEN}✓${NC} Skills synced"
 echo ""
-echo -e "    ${CYAN}hermes${NC}"
+echo -e "  ${BOLD}Restart to see the rebrand:${NC}"
 echo ""
-echo -e "  ${DIM}On first run, Zeus will greet you with its soul and memory context.${NC}"
+echo -e "    ${CYAN}zeus${NC}        ${DIM}# new branded entry point${NC}"
+echo -e "    ${DIM}# or:${NC}"
+echo -e "    ${CYAN}hermes${NC}      ${DIM}# legacy alias, same binary${NC}"
+echo ""
+echo -e "  ${DIM}First run will greet you with the Zeus persona and memory context.${NC}"
 echo ""

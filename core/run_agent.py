@@ -1168,7 +1168,7 @@ class AIAgent:
                 if base_url_host_matches(effective_base, "openrouter.ai"):
                     client_kwargs["default_headers"] = {
                         "HTTP-Referer": "https://hermes-agent.nousresearch.com",
-                        "X-OpenRouter-Title": "Hermes Agent",
+                        "X-OpenRouter-Title": "Zeus",
                         "X-OpenRouter-Categories": "productivity,cli-agent",
                     }
                 elif base_url_host_matches(effective_base, "api.githubcopilot.com"):
@@ -1710,7 +1710,7 @@ class AIAgent:
             raise ValueError(
                 f"Model {self.model} has a context window of {_ctx:,} tokens, "
                 f"which is below the minimum {MINIMUM_CONTEXT_LENGTH:,} required "
-                f"by Hermes Agent.  Choose a model with at least "
+                f"by Zeus.  Choose a model with at least "
                 f"{MINIMUM_CONTEXT_LENGTH // 1000}K context, or set "
                 f"model.context_length in config.yaml to override."
             )
@@ -2186,8 +2186,8 @@ class AIAgent:
                 raise ValueError(
                     f"Auxiliary compression model {aux_model} has a context "
                     f"window of {aux_context:,} tokens, which is below the "
-                    f"minimum {MINIMUM_CONTEXT_LENGTH:,} required by Hermes "
-                    f"Agent.  Choose a compression model with at least "
+                    f"minimum {MINIMUM_CONTEXT_LENGTH:,} required by Zeus."
+                    f"  Choose a compression model with at least "
                     f"{MINIMUM_CONTEXT_LENGTH // 1000}K context (set "
                     f"auxiliary.compression.model in config.yaml), or set "
                     f"auxiliary.compression.context_length to override the "
@@ -10111,7 +10111,7 @@ class AIAgent:
                         print(f"{self.log_prefix}   Troubleshooting:")
                         from hermes_constants import display_hermes_home as _dhh_fn
                         _dhh = _dhh_fn()
-                        print(f"{self.log_prefix}     • Check ANTHROPIC_TOKEN in {_dhh}/.env for Hermes-managed OAuth/setup tokens")
+                        print(f"{self.log_prefix}     • Check ANTHROPIC_TOKEN in {_dhh}/.env for Zeus-managed OAuth/setup tokens")
                         print(f"{self.log_prefix}     • Check ANTHROPIC_API_KEY in {_dhh}/.env for API keys or legacy token values")
                         print(f"{self.log_prefix}     • For API keys: verify at https://platform.claude.com/settings/keys")
                         print(f"{self.log_prefix}     • For Claude Code: run 'claude /login' to refresh, then retry")

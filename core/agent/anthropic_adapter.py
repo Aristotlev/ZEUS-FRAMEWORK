@@ -738,7 +738,7 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
     auth_url = f"https://claude.ai/oauth/authorize?{urlencode(params)}"
 
     print()
-    print("Authorize Hermes with your Claude Pro/Max subscription.")
+    print("Authorize Zeus with your Claude Pro/Max subscription.")
     print()
     print("╭─ Claude Pro/Max Authorization ────────────────────╮")
     print("│                                                   │")
@@ -1355,6 +1355,9 @@ def build_anthropic_kwargs(
                 text = text.replace("Hermes Agent", "Claude Code")
                 text = text.replace("Hermes agent", "Claude Code")
                 text = text.replace("hermes-agent", "claude-code")
+                text = text.replace("Zeus Framework", "Claude Code")
+                text = text.replace("zeus-framework", "claude-code")
+                text = text.replace("Zeus", "Claude Code")
                 text = text.replace("Nous Research", "Anthropic")
                 block["text"] = text
 

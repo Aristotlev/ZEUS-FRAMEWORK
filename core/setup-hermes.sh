@@ -282,7 +282,7 @@ fi
 # PATH setup — symlink hermes into a user-facing bin dir
 # ============================================================================
 
-echo -e "${CYAN}→${NC} Setting up hermes command..."
+echo -e "${CYAN}→${NC} Setting up hermes / zeus commands..."
 
 HERMES_BIN="$SCRIPT_DIR/venv/bin/hermes"
 COMMAND_LINK_DIR="$(get_command_link_dir)"
@@ -290,6 +290,9 @@ COMMAND_LINK_DISPLAY_DIR="$(get_command_link_display_dir)"
 mkdir -p "$COMMAND_LINK_DIR"
 ln -sf "$HERMES_BIN" "$COMMAND_LINK_DIR/hermes"
 echo -e "${GREEN}✓${NC} Symlinked hermes → $COMMAND_LINK_DISPLAY_DIR/hermes"
+# Zeus alias — same binary, Zeus-branded entry point. Both names work.
+ln -sf "$HERMES_BIN" "$COMMAND_LINK_DIR/zeus"
+echo -e "${GREEN}✓${NC} Symlinked zeus → $COMMAND_LINK_DISPLAY_DIR/zeus"
 
 if is_termux; then
     export PATH="$COMMAND_LINK_DIR:$PATH"
@@ -362,31 +365,33 @@ echo "Next steps:"
 echo ""
 if is_termux; then
     echo "  1. Run the setup wizard to configure API keys:"
-    echo "     hermes setup"
+    echo "     zeus setup"
     echo ""
     echo "  2. Start chatting:"
-    echo "     hermes"
+    echo "     zeus"
     echo ""
 else
     echo "  1. Reload your shell:"
     echo "     source $SHELL_CONFIG"
     echo ""
     echo "  2. Run the setup wizard to configure API keys:"
-    echo "     hermes setup"
+    echo "     zeus setup"
     echo ""
     echo "  3. Start chatting:"
-    echo "     hermes"
+    echo "     zeus"
     echo ""
 fi
 echo "Other commands:"
-echo "  hermes status        # Check configuration"
+echo "  zeus status        # Check configuration"
 if is_termux; then
-    echo "  hermes gateway       # Run gateway in foreground"
+    echo "  zeus gateway       # Run gateway in foreground"
 else
-    echo "  hermes gateway install # Install gateway service (messaging + cron)"
+    echo "  zeus gateway install # Install gateway service (messaging + cron)"
 fi
-echo "  hermes cron list     # View scheduled jobs"
-echo "  hermes doctor        # Diagnose issues"
+echo "  zeus cron list     # View scheduled jobs"
+echo "  zeus doctor        # Diagnose issues"
+echo ""
+echo "  (the legacy 'hermes' command still works — it's the same binary.)"
 echo ""
 
 # Ask if they want to run setup wizard now
