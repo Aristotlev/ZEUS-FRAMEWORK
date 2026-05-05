@@ -84,9 +84,9 @@ security:
 # write, and publish in these topics. Accepts a string or a list.
 content_pipeline:
   # Examples:
-  #   niche: "personal finance"
-  #   niche: [finance, crypto, stocks, forex, geopolitics]
+  #   niche: "ai research"
   #   niche: [ai, machine learning, tech startups]
+  #   niche: [climate, sustainability, energy]
   niche: []  # ← set this before running setup_content_cron.py
 
   # Model used by the content cron jobs. Pick a fast, high-throughput model

@@ -1,12 +1,16 @@
 """
 Notion archive writer for Zeus content pipeline.
 
-Saves every generated ContentPiece to the Omnifolio Content Hub archive database.
-Auto-discovers the child database under the Content Hub page if no DB ID is provided.
-The first call caches the resolved DB id to ~/.hermes/notion_ids.json.
+Saves every generated ContentPiece to your Notion content-hub archive database.
+Auto-discovers the child database under the parent page given by ZEUS_NOTION_HUB_PAGE_ID
+(or the legacy NOTION_CONTENT_HUB_PAGE_ID). The first call caches the resolved DB id
+to ~/.hermes/notion_ids.json so subsequent runs skip the lookup.
 
-Page URL: https://www.notion.so/Omnifolio-Content-Hub-3552041931f5809e9180e18b537cdef5
-Required env: NOTION_API_KEY in ~/.hermes/.env
+Required env:
+  NOTION_API_KEY               — Notion integration token
+  ZEUS_NOTION_HUB_PAGE_ID      — Notion page id of the parent page that holds the
+                                 archive database (32-char hex, no dashes; copy the
+                                 trailing id from the page URL)
 
 Resilience: queries the DB schema once and only sends properties that actually exist,
 so the same code works whether the user's archive DB has Title/Status/Cost/etc. or a
@@ -83,7 +87,6 @@ def _render_post_links(p: ContentPiece) -> Optional[str]:
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"  # 2025-09-03 silently drops props on database ops
 
-DEFAULT_HUB_PAGE_ID = "3552041931f5809e9180e18b537cdef5"
 CONFIG_PATH = Path(os.path.expanduser("~/.hermes/notion_ids.json"))
 
 NOTION_TEXT_LIMIT = 1900  # Notion's hard cap on rich_text content is 2000
@@ -131,7 +134,7 @@ class NotionArchive:
         self,
         api_key: Optional[str] = None,
         archive_db_id: Optional[str] = None,
-        hub_page_id: str = DEFAULT_HUB_PAGE_ID,
+        hub_page_id: Optional[str] = None,
     ):
         self.api_key = api_key or os.getenv("NOTION_API_KEY")
         if not self.api_key:
@@ -141,7 +144,18 @@ class NotionArchive:
             "Notion-Version": NOTION_VERSION,
             "Content-Type": "application/json",
         }
-        self.hub_page_id = _hyphenate(hub_page_id) or hub_page_id
+        hub = (
+            hub_page_id
+            or os.getenv("ZEUS_NOTION_HUB_PAGE_ID")
+            or os.getenv("NOTION_CONTENT_HUB_PAGE_ID")
+        )
+        if not hub and not archive_db_id:
+            raise RuntimeError(
+                "Set ZEUS_NOTION_HUB_PAGE_ID to the 32-char hex id of your Notion "
+                "content-hub page (the trailing id in the page URL), or pass "
+                "archive_db_id directly."
+            )
+        self.hub_page_id = _hyphenate(hub) or hub
         self._archive_db_id: Optional[str] = _hyphenate(archive_db_id)
         self._db_schema: Optional[dict] = None
 

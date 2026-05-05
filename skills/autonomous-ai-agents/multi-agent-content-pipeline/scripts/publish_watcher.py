@@ -60,12 +60,12 @@ log = logging.getLogger("zeus-watcher")
 
 PUBLER_BASE = "https://app.publer.com/api/v1"
 PUBLER_KEY = os.getenv("PUBLER_API_KEY", "")
-PUBLER_WORKSPACE = os.getenv("PUBLER_WORKSPACE_ID", "your-workspace-id")
+PUBLER_WORKSPACE = os.getenv("PUBLER_WORKSPACE_ID", "")
 PUBLER_ACCOUNTS = {
-    "twitter": os.getenv("PUBLER_TWITTER_ID", "69f783d1afc106b8869cf50b"),
-    "instagram": os.getenv("PUBLER_INSTAGRAM_ID", "69f6511c5cf7421d7047fc4e"),
-    "linkedin": os.getenv("PUBLER_LINKEDIN_ID", "69f783c63642e046435f7707"),
-    "tiktok": os.getenv("PUBLER_TIKTOK_ID", "69f783de2c63a6ec70868731"),
+    "twitter": os.getenv("PUBLER_TWITTER_ID", ""),
+    "instagram": os.getenv("PUBLER_INSTAGRAM_ID", ""),
+    "linkedin": os.getenv("PUBLER_LINKEDIN_ID", ""),
+    "tiktok": os.getenv("PUBLER_TIKTOK_ID", ""),
     "youtube": os.getenv("PUBLER_YOUTUBE_ID", ""),
     "reddit": os.getenv("PUBLER_REDDIT_ID", ""),
     "facebook": os.getenv("PUBLER_FACEBOOK_ID", ""),

@@ -17,3 +17,6 @@ wandb/
 .DS_Store
 # Claude Code subagent worktrees — local session scratch space, never commit
 .claude/worktrees/
+# Claude Code per-user local settings — leaks usernames + local paths
+.claude/settings.local.json
+.claude/settings.*.local.json

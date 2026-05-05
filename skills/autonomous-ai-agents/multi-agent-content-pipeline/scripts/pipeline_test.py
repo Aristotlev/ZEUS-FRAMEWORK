@@ -8,7 +8,7 @@ publishing step, so generation spend can never be lost again.
 Stack (May 2026):
     Text:  OpenRouter (gemini-2.5-flash)
     Media: fal.ai (GPT Image 2 for images, Kling 2.5 Turbo Pro for video)
-    Archive: Notion (Omnifolio Content Hub -> Archive DB)
+    Archive: Notion (your content-hub page -> Archive DB)
     Publish: Publer (optional, with --publish flag)
 
 Usage:
@@ -72,12 +72,12 @@ ORCHESTRATOR_MODEL = "google/gemini-2.5-flash"
 PUBLER_BASE = "https://app.publer.com/api/v1"
 PUBLER_KEY = os.getenv("PUBLER_API_KEY", "")
 PUBLER_AUTH = f"Bearer-API {PUBLER_KEY}"
-PUBLER_WORKSPACE = os.getenv("PUBLER_WORKSPACE_ID", "your-workspace-id")
+PUBLER_WORKSPACE = os.getenv("PUBLER_WORKSPACE_ID", "")
 PUBLER_ACCOUNTS = {
-    "twitter": os.getenv("PUBLER_TWITTER_ID", "69f783d1afc106b8869cf50b"),
-    "instagram": os.getenv("PUBLER_INSTAGRAM_ID", "69f6511c5cf7421d7047fc4e"),
-    "linkedin": os.getenv("PUBLER_LINKEDIN_ID", "69f783c63642e046435f7707"),
-    "tiktok": os.getenv("PUBLER_TIKTOK_ID", "69f783de2c63a6ec70868731"),
+    "twitter": os.getenv("PUBLER_TWITTER_ID", ""),
+    "instagram": os.getenv("PUBLER_INSTAGRAM_ID", ""),
+    "linkedin": os.getenv("PUBLER_LINKEDIN_ID", ""),
+    "tiktok": os.getenv("PUBLER_TIKTOK_ID", ""),
     "youtube": os.getenv("PUBLER_YOUTUBE_ID", ""),
     "reddit": os.getenv("PUBLER_REDDIT_ID", ""),
     "facebook": os.getenv("PUBLER_FACEBOOK_ID", ""),
@@ -97,7 +97,7 @@ IMAGE_SPECS = {
 # ---------------------------------------------------------------------------
 # Niche loading — pulls content_pipeline.niche from ~/.hermes/config.yaml.
 # Without this the LLM produces generic copy regardless of what the user's
-# pipeline is actually about (finance/crypto/stocks/forex/geopolitics, etc.).
+# pipeline is actually about (whatever niche/subcategories you've configured).
 # ---------------------------------------------------------------------------
 def _load_niche() -> list[str]:
     cfg_path = pathlib.Path(os.path.expanduser("~/.hermes/config.yaml"))

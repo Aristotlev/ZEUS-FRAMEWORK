@@ -122,7 +122,9 @@ security:
   redact_secrets: true
 
 content_pipeline:
-  niche: [finance, crypto, stocks, forex, geopolitics]
+  # Set your niche before running the content cron jobs. Accepts a string or list.
+  # Examples: "ai research" or [ai, machine learning, tech startups]
+  niche: []
   cron_model: deepseek/deepseek-v4-flash
   cron_provider: openrouter
   cron_base_url: https://openrouter.ai/api/v1

@@ -20,7 +20,7 @@ PG_URL = {
     "port": int(os.environ.get("MNEMOSYNE_PG_PORT", "5432")),
     "database": os.environ.get("MNEMOSYNE_PG_DB", "hermes_vectors"),
     "user": os.environ.get("MNEMOSYNE_PG_USER", "hermes"),
-    "password": os.environ.get("MNEMOSYNE_PG_PASSWORD", "hermes_unstoppable"),
+    "password": os.environ.get("MNEMOSYNE_PG_PASSWORD", "change-me-in-prod"),
 }
 
 class HermesStack:

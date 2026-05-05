@@ -30,7 +30,7 @@
     30|**Status:** ✅ Working. Zero setup needed.
     31|
     32|```
-    33|Inbox: hermesomni@agentmail.to
+    33|Inbox: <your-inbox>@agentmail.to
     34|Auth: Automatic (Hermes agentmail MCP tools)
     35|Domains: @agentmail.to
     36|```
@@ -76,7 +76,7 @@
     76|Encryption: STARTTLS
     77|Username: user@example.com
     78|Password: <APP PASSWORD>
-    79|From: Aris <user@example.com>
+    79|From: Your Name <user@example.com>
     80|```
     81|
     82|**Daily limit:** 500 emails (Gmail free tier)
@@ -92,7 +92,7 @@
     92|    username: user@example.com
     93|    password_env: HERMES_GMAIL_APP_PASSWORD
     94|    encryption: starttls
-    95|    from: "Aris <user@example.com>"
+    95|    from: "Your Name <user@example.com>"
     96|```
     97|
     98|### Production deployment:

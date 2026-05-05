@@ -11,7 +11,7 @@ Backend selection (first one configured wins):
   3. Gmail SMTP   (HERMES_GMAIL_APP_PASSWORD + HERMES_GMAIL_USER) — fallback
   4. File         (always)                 — last resort: writes the email body to a local file so nothing is lost
 
-Recipient defaults to ZEUS_NOTIFY_EMAIL or `ariscsc@gmail.com`.
+Recipient is read from ZEUS_NOTIFY_EMAIL — required. No hardcoded fallback.
 """
 from __future__ import annotations
 
@@ -30,15 +30,20 @@ from .ledger import summary as ledger_summary
 
 log = logging.getLogger("zeus.email")
 
-DEFAULT_RECIPIENT = os.getenv("ZEUS_NOTIFY_EMAIL", "ariscsc@gmail.com")
+DEFAULT_RECIPIENT = os.getenv("ZEUS_NOTIFY_EMAIL", "")
 FROM_NAME = os.getenv("ZEUS_NOTIFY_FROM_NAME", "Zeus Pipeline")
-FROM_EMAIL_FALLBACK = os.getenv("ZEUS_NOTIFY_FROM_EMAIL", "hermesomni@agentmail.to")
+FROM_EMAIL_FALLBACK = os.getenv("ZEUS_NOTIFY_FROM_EMAIL", "")
 LOCAL_INBOX = Path(os.path.expanduser("~/.hermes/zeus_email_outbox"))
 
 
 def send_pipeline_summary(piece: ContentPiece, recipient: Optional[str] = None) -> str:
     """Send the post-run summary. Returns the backend that handled it ('resend'|'agentmail'|'smtp'|'file')."""
     to_addr = recipient or DEFAULT_RECIPIENT
+    if not to_addr:
+        raise RuntimeError(
+            "ZEUS_NOTIFY_EMAIL is not set and no recipient was passed. "
+            "Set ZEUS_NOTIFY_EMAIL in ~/.hermes/.env (or pass recipient=...)."
+        )
     subject = _subject(piece)
     html = _html_body(piece)
     text = _text_body(piece)
@@ -355,7 +360,9 @@ def _send_resend(to: str, subject: str, html: str, text: str) -> None:
 
 def _send_agentmail(to: str, subject: str, html: str, text: str) -> None:
     key = os.environ["AGENTMAIL_API_KEY"]
-    inbox = os.getenv("AGENTMAIL_INBOX", "hermesomni@agentmail.to")
+    inbox = os.environ.get("AGENTMAIL_INBOX")
+    if not inbox:
+        raise RuntimeError("AGENTMAIL_INBOX not set (full address, e.g. yours@agentmail.to)")
     r = requests.post(
         f"https://api.agentmail.to/v0/inboxes/{inbox}/messages/send",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},

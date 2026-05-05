@@ -31,7 +31,7 @@ FOUR CONTENT TYPES. Pick exactly one per run — never interleave.
 - **TTS**: **fish.audio** S1 — user mandate: "for TTS we use fish.audio cause everything else is unacceptable shit". Endpoint `https://api.fish.audio/v1/tts`, header `Authorization: Bearer $FISH_AUDIO_API_KEY`, body `{text, format, prosody, reference_id?}`. ~$15/1M chars on S1.
 - **Music**: `fal-ai/cassetteai/music-generator` (swappable via `model_slug`)
 - **Distribution**: Publer
-- **Archive**: Notion (Omnifolio Content Hub -> Archive DB, auto-discovered)
+- **Archive**: Notion (your content-hub page -> Archive DB, auto-discovered)
 - **Notifications**: Resend / AgentMail / Gmail SMTP (auto-pick by configured env)
 - **Cost ledger**: `~/.hermes/zeus_cost_ledger.jsonl` — every run, every cost
 
@@ -41,8 +41,8 @@ FOUR CONTENT TYPES. Pick exactly one per run — never interleave.
 
 - `OPENROUTER_API_KEY`, `FAL_KEY`, `NOTION_API_KEY`, `PUBLER_API_KEY`, `FISH_AUDIO_API_KEY` in `~/.hermes/.env`
 - Optional Publer overrides: `PUBLER_TWITTER_ID`, `PUBLER_INSTAGRAM_ID`, `PUBLER_LINKEDIN_ID`, `PUBLER_TIKTOK_ID`, `PUBLER_YOUTUBE_ID`, `PUBLER_REDDIT_ID`, `PUBLER_FACEBOOK_ID`, `PUBLER_WORKSPACE_ID`
-- Optional notification overrides: `ZEUS_NOTIFY_EMAIL` (default `ariscsc@gmail.com`); plus one of `RESEND_API_KEY` / `AGENTMAIL_API_KEY` / (`HERMES_GMAIL_USER`+`HERMES_GMAIL_APP_PASSWORD`)
-- Notion archive DB cached at `~/.hermes/notion_ids.json`. First run auto-discovers the database under page id `3552041931f5809e9180e18b537cdef5` (Omnifolio Content Hub).
+- Required notification env: `ZEUS_NOTIFY_EMAIL` (recipient address); plus one of `RESEND_API_KEY` / `AGENTMAIL_API_KEY` / (`HERMES_GMAIL_USER`+`HERMES_GMAIL_APP_PASSWORD`)
+- Notion archive DB cached at `~/.hermes/notion_ids.json`. First run auto-discovers the database under the parent page id given by `ZEUS_NOTION_HUB_PAGE_ID` (copy the trailing 32-char hex id from your Notion content-hub page URL).
 - Python deps: `pip install fal-client requests`
 
 ## Quickstart
@@ -128,7 +128,7 @@ Always `download(url, dest_path)` after generation — fal output URLs can expir
 ### 5. Archive to Notion (BEFORE posting)
 
 ```python
-archive = NotionArchive()  # auto-discovers archive DB under Omnifolio Content Hub
+archive = NotionArchive()  # auto-discovers archive DB under ZEUS_NOTION_HUB_PAGE_ID
 archive.archive(piece)     # creates page; piece.notion_page_id is set
 ```
 
@@ -177,7 +177,7 @@ send_pipeline_summary(piece)   # email with post links + run cost + 24h/7d/30d/a
 **Solution**: Publer's YouTube integration only handles video. Image/text community posts return "YouTube requires a video attached." So YouTube is in the article/carousel target list ONLY for the long-form video type. For article/carousel, skip YouTube.
 
 ### Pitfall: AgentMail inbox ID is the full email
-**Solution**: Inbox ID is `hermesomni@agentmail.to` (full email), not just `hermesomni`. Short name returns 404.
+**Solution**: Inbox ID is the full email address (e.g. `your-inbox@agentmail.to`), not just the local part. Short name returns 404.
 
 ### Pitfall: Twitter blocks duplicate text across accounts/posts
 **Solution**: Vary the text per platform. The variant generation call already does this; never copy-paste the article verbatim across platforms.

@@ -26,11 +26,15 @@ from lib import (  # noqa: E402
 PUBLER_BASE = "https://app.publer.com/api/v1"
 PUBLER_KEY = os.environ["PUBLER_API_KEY"]
 PUBLER_WORKSPACE = os.environ["PUBLER_WORKSPACE_ID"]
-PROVIDER_BY_ACCOUNT = {
-    "69f6511c5cf7421d7047fc4e": "instagram",
-    "69f783c63642e046435f7707": "linkedin",
-    "69f783de2c63a6ec70868731": "tiktok",
-    "69f783d1afc106b8869cf50b": "twitter",
+
+# Account ids are read from env. Set PUBLER_<PLATFORM>_ID for any platform you
+# want to republish to. Missing platforms are skipped.
+ACCOUNTS_BY_PROVIDER: dict[str, str] = {
+    prov: os.environ.get(f"PUBLER_{prov.upper()}_ID", "")
+    for prov in ("instagram", "linkedin", "tiktok", "twitter", "youtube", "reddit", "facebook")
+}
+PROVIDER_BY_ACCOUNT: dict[str, str] = {
+    acct_id: prov for prov, acct_id in ACCOUNTS_BY_PROVIDER.items() if acct_id
 }
 
 H_AUTH = {
@@ -164,15 +168,13 @@ def main():
     print(f"\nRescheduling for UTC {when}")
 
     job_ids: dict[str, str] = {}
-    accounts = {
-        "instagram": "69f6511c5cf7421d7047fc4e",
-        "linkedin": "69f783c63642e046435f7707",
-        "tiktok": "69f783de2c63a6ec70868731",
-        "twitter": "69f783d1afc106b8869cf50b",
-    }
+    accounts = ACCOUNTS_BY_PROVIDER
     for prov in ("instagram", "linkedin", "tiktok"):
         posts = by_provider[prov]
         if not posts:
+            continue
+        if not accounts.get(prov):
+            print(f"  ! skip {prov}: PUBLER_{prov.upper()}_ID not set")
             continue
         text = posts[0].get("text", "")
         jid = schedule_simple(prov, accounts[prov], text, media_id, when)
