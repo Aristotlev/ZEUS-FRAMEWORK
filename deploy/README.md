@@ -69,18 +69,35 @@ Cron is registered inside the agent container via Hermes' built-in scheduler. On
 docker exec -it zeus-agent python3 /opt/zeus/scripts/setup_content_cron.py
 ```
 
-This registers the four jobs (article slot, carousel 00:30/12:30, daily crawl, Notion ideas). They fire from inside the always-running container — the heartbeat loop in `zeus-prod-entrypoint.sh` keeps it alive.
+This registers the four jobs (article slot, carousel 00:30/12:30, daily crawl, Notion ideas).
 
-> **Caveat to verify on your first deploy:** Hermes' in-app cron daemon needs to be running for the jobs to fire. The prod entrypoint keeps the container alive but does not start a Hermes daemon. If `setup_content_cron.py` registers jobs that never fire, fall back to host-level systemd timers — see "Fallback: host cron" below.
+The prod entrypoint runs `hermes gateway run` in the foreground — the gateway includes a built-in cron-ticker thread that polls every 60s and fires due jobs, so registered jobs will execute as long as the container is up.
+
+Verify the gateway and jobs:
+
+```bash
+docker exec -it zeus-agent hermes cron status   # ✓ Gateway is running + N active job(s)
+docker exec -it zeus-agent hermes cron list     # see schedules + next_run_at
+docker exec -it zeus-agent hermes cron logs zeus-content-carousel-slot  # tail a run
+```
 
 ## Remote trigger (from your phone, browser, anywhere)
+
+Explicit topic:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $ZEUS_TRIGGER_TOKEN" \
   "https://zeus.yourdomain.com/trigger/article?topic=Bitcoin%20breaks%20100K"
 ```
 
-Valid types: `article`, `long_article`, `carousel`, `short_video`, `long_video`.
+Niche-pick (uses `content_pipeline.niche` from `config.yaml`):
+
+```bash
+curl -X POST -H "Authorization: Bearer $ZEUS_TRIGGER_TOKEN" \
+  "https://zeus.yourdomain.com/trigger/carousel?auto=1"
+```
+
+Add `&publish=0` to archive-only (no Publer post). Valid types: `article`, `long_article`, `carousel`, `short_video`, `long_video`.
 
 ## Webhooks
 
@@ -187,26 +204,37 @@ systemctl restart zeus
 
 ## Fallback: host cron
 
-If Hermes' in-app cron doesn't fire reliably from a non-interactive container, drop the in-app jobs and use host-side systemd timers instead. Skeleton (not auto-installed):
+If you'd rather drive scheduling from systemd than from the in-container gateway (e.g. the gateway crashed and you want belt-and-braces), use host-side timers. `pipeline_test.py` accepts `--auto`, which picks a topic from `content_pipeline.niche` in `~/.hermes/config.yaml` via a cheap LLM call (~$0.0001) — no `--topic` needed.
 
 ```ini
 # /etc/systemd/system/zeus-carousel.service
+[Unit]
+Description=Zeus carousel slot
+
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/docker exec zeus-agent python3 \
   /opt/zeus/skills/autonomous-ai-agents/multi-agent-content-pipeline/scripts/pipeline_test.py \
-  --type carousel --auto
+  --type carousel --auto --publish
 
 # /etc/systemd/system/zeus-carousel.timer
+[Unit]
+Description=Zeus carousel — 00:30 and 12:30 daily
+
 [Timer]
 OnCalendar=*-*-* 00:30:00
 OnCalendar=*-*-* 12:30:00
 Persistent=true
+
 [Install]
 WantedBy=timers.target
 ```
 
-(That `--auto` would need a corresponding flag in `pipeline_test.py` to pick a topic from your daily crawl; currently `--topic` is required.)
+If you go this route, also remove the equivalent in-app job to avoid double-posting:
+
+```bash
+docker exec -it zeus-agent hermes cron remove zeus-content-carousel-slot
+```
 
 ## Files in this directory
 

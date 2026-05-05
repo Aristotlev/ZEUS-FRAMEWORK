@@ -134,6 +134,43 @@ def _niche_clause() -> str:
     )
 
 
+def auto_pick_topic(content_type: "ContentType") -> str:
+    """Pick a current, niche-specific topic when no --topic is provided.
+
+    Used by --auto so host-side timers and `/trigger?auto=1`-style callers
+    can fire the pipeline without naming a story. Cheap gemini-flash call
+    (~$0.0001) — cost is logged but not added to the piece ledger since the
+    piece doesn't exist yet at this point.
+    """
+    if not NICHE:
+        raise RuntimeError(
+            "auto-pick: no niche configured. Set content_pipeline.niche in "
+            "~/.hermes/config.yaml (e.g. [finance, crypto, geopolitics]) "
+            "or pass --topic explicitly."
+        )
+    type_hint = {
+        ContentType.ARTICLE: "punchy article (one angle, one strong take)",
+        ContentType.LONG_ARTICLE: "deep-dive analysis (multi-angle, data-rich)",
+        ContentType.CAROUSEL: "visual-breakdown story (timeline, ranking, or step-by-step)",
+        ContentType.SHORT_VIDEO: "high-energy 30-90s video story",
+        ContentType.LONG_VIDEO: "explainer / breakdown video",
+    }.get(content_type, "story")
+    prompt = (
+        f"You scout today's most newsworthy story for a {' / '.join(NICHE)} "
+        f"content desk. Suggest ONE specific, current headline-style topic "
+        f"suitable for a {type_hint}. "
+        f"Return ONLY the topic — no preamble, no quotes, no markdown, no trailing period. "
+        f"Concrete (specific tickers, names, numbers, or events), not generic. "
+        f"6-14 words."
+    )
+    text, cost, source = openrouter_chat(prompt, max_tokens=80)
+    topic = text.strip().strip('"').strip("'").splitlines()[0].rstrip(".").strip()
+    if not topic:
+        raise RuntimeError("auto-pick: LLM returned empty topic")
+    log.info(f"auto-pick: '{topic}' (picker cost ~${cost:.5f}, source={source})")
+    return topic
+
+
 # ---------------------------------------------------------------------------
 # OpenRouter text generation
 # ---------------------------------------------------------------------------
@@ -1004,7 +1041,13 @@ def run(
 def main() -> int:
     p = argparse.ArgumentParser(description="Zeus content pipeline test runner")
     p.add_argument("--type", required=True, choices=[t.value for t in ContentType])
-    p.add_argument("--topic", required=True, help="Topic/headline for the content")
+    p.add_argument("--topic", required=False, default=None, help="Topic/headline for the content (required unless --auto)")
+    p.add_argument(
+        "--auto",
+        action="store_true",
+        help="Pick a topic from content_pipeline.niche via a cheap LLM call. "
+             "Use for host-side cron / scheduled runs. Mutually exclusive with --topic.",
+    )
     p.add_argument("--slides", type=int, default=4, help="Slides for carousels (3-5)")
     p.add_argument("--duration", type=int, default=5, help="Seconds for video (5-10 per call)")
     p.add_argument(
@@ -1028,6 +1071,13 @@ def main() -> int:
     )
     args = p.parse_args()
 
+    if args.auto and args.topic:
+        log.error("--auto and --topic are mutually exclusive")
+        return 2
+    if not args.auto and not args.topic:
+        log.error("provide --topic, or pass --auto to pick from your niche")
+        return 2
+
     required = ["OPENROUTER_API_KEY", "FAL_KEY", "NOTION_API_KEY"]
     if args.publish:
         required.append("PUBLER_API_KEY")
@@ -1042,9 +1092,10 @@ def main() -> int:
         audio_mode = None
 
     try:
+        topic = args.topic or auto_pick_topic(ContentType(args.type))
         run(
             ContentType(args.type),
-            args.topic,
+            topic,
             slides=args.slides,
             duration=args.duration,
             do_publish=args.publish,

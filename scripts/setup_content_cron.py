@@ -21,9 +21,12 @@ Run from anywhere:
     python scripts/setup_content_cron.py
     python scripts/setup_content_cron.py --niche "ai, machine learning, robotics"
 
-The cron daemon must be running for jobs to actually fire:
-    hermes cron start         # foreground
-    hermes cron daemon        # background
+The gateway drives cron — it must be running for jobs to actually fire:
+    hermes gateway run                  # foreground
+    hermes gateway install              # systemd user service (Linux)
+    sudo hermes gateway install --system  # boot-time system service
+Inside the production container the entrypoint launches `hermes gateway run`,
+so jobs fire as long as the container is up.
 """
 
 import argparse
@@ -233,10 +236,11 @@ def main():
         print(f"Created {spec['name']:35s}  schedule={spec['schedule']:25s}  id={job['id'][:8]}")
 
     print()
-    print("Done. To start firing them:")
-    print("  hermes cron daemon       # background scheduler")
-    print("  hermes cron list         # verify jobs are registered")
-    print("  hermes cron logs <name>  # tail run output")
+    print("Done. The gateway drives the schedule — it must be running for jobs to fire:")
+    print("  hermes gateway run            # foreground (or already running in the prod container)")
+    print("  hermes cron status            # confirm the gateway is up + see active jobs")
+    print("  hermes cron list              # list registered jobs")
+    print("  hermes cron logs <name>       # tail a job's run output")
 
 
 if __name__ == "__main__":

@@ -178,23 +178,40 @@ th{{color:#888;font-weight:500;text-transform:uppercase;font-size:11px}}
 
 
 @app.post("/trigger/{content_type}")
-def trigger(content_type: str, topic: str, authorization: str | None = Header(None)) -> dict:
-    """Kick off a pipeline run. Bearer-auth required."""
+def trigger(
+    content_type: str,
+    topic: str | None = None,
+    auto: int = 0,
+    publish: int = 1,
+    authorization: str | None = Header(None),
+) -> dict:
+    """Kick off a pipeline run. Bearer-auth required.
+
+    Provide either `topic=...` (explicit headline) or `auto=1` (pick from
+    content_pipeline.niche). `publish=0` archives only (default publishes).
+    """
     _require_token(authorization)
     valid = {"article", "long_article", "carousel", "short_video", "long_video"}
     if content_type not in valid:
         raise HTTPException(400, f"invalid content_type, expected one of {sorted(valid)}")
+    if not topic and not auto:
+        raise HTTPException(400, "provide ?topic=... or ?auto=1")
+    if topic and auto:
+        raise HTTPException(400, "topic and auto are mutually exclusive")
     cmd = [
         "docker", "exec", "-d", ZEUS_CONTAINER,
         "python3",
         "/opt/zeus/skills/autonomous-ai-agents/multi-agent-content-pipeline/scripts/pipeline_test.py",
-        "--type", content_type, "--topic", topic,
+        "--type", content_type,
     ]
+    cmd += ["--auto"] if auto else ["--topic", topic]
+    if publish:
+        cmd.append("--publish")
     try:
         subprocess.run(cmd, check=True, capture_output=True, timeout=10)
     except subprocess.CalledProcessError as e:
         raise HTTPException(500, f"docker exec failed: {e.stderr.decode()[:300]}")
-    return {"queued": True, "type": content_type, "topic": topic}
+    return {"queued": True, "type": content_type, "topic": topic, "auto": bool(auto), "publish": bool(publish)}
 
 
 @app.post("/webhook/{source}")

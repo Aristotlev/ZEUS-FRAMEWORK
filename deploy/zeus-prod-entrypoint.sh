@@ -174,10 +174,13 @@ wait_for() {
 wait_for "${REDIS_HOST:-redis}" "${REDIS_PORT:-6379}" "Redis"
 wait_for "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "PostgreSQL"
 
-echo "[zeus-prod] bootstrap complete — entering heartbeat loop"
+echo "[zeus-prod] bootstrap complete — starting gateway (drives cron jobs)"
 
-# ── Heartbeat loop — keeps container alive, signals liveness to /health ─────
-while true; do
-    touch "$HERMES_HOME/.heartbeat"
-    sleep 300
-done
+# Background heartbeat — proves the entrypoint is alive to /health and the
+# docker healthcheck. Touched every 60s; healthcheck tolerates 30min.
+( while true; do touch "$HERMES_HOME/.heartbeat"; sleep 60; done ) &
+
+# Foreground: run the gateway. Its built-in cron-ticker thread fires the jobs
+# registered by setup_content_cron.py every 60s. When the gateway exits the
+# container exits, and `restart: unless-stopped` brings it back up.
+exec hermes gateway run
