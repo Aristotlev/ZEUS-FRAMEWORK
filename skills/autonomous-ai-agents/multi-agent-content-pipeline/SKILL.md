@@ -27,6 +27,17 @@ Platform Publishers (API Integration)
 
 ## Key Components
 
+### 0. Content Type Taxonomy (canonical, May 2026)
+
+| Type | Media | Platforms | Description Length | Implementation |
+|------|-------|-----------|--------------------|----------------|
+| `article` | 1 image (1024x1024 default) | Twitter, IG, LI, TT | 550-900 chars (clears "read more" everywhere) | `ContentType.ARTICLE` |
+| `carousel` | 3-5 slide images | Twitter, IG, LI, TT | 550-900 chars | `ContentType.CAROUSEL` |
+| `short_video` | 1080x1920 video, <90s | Twitter, IG (reel), LI, TT, YouTube | 300-500 char script | `ContentType.SHORT_VIDEO` |
+| `long_video` | 1920x1080 video | YouTube, Twitter, LI, Reddit | 700-1200 char script | `ContentType.LONG_VIDEO` |
+
+The single `ContentPiece` dataclass (lib/content_types.py) flows through every pipeline stage: text gen -> variants -> media -> Notion archive -> Publer -> email -> ledger. The validate() method enforces per-type invariants (image counts, video resolution, duration cap).
+
 ### 1. Daily Orchestrator Agent
 - **Purpose**: High-level content planning and pipeline coordination
 - **Model**: Use premium model (expensive but runs once daily)
@@ -48,12 +59,13 @@ Route by complexity, not content type:
 - Template fills
 - Format conversions
 
-### Media Generation Pipeline
-**Tiered cost strategy with provider optimization:**
-- **Images**: Replicate GPT Image 2 ($0.047 medium). Valid ratios: 1:1, 3:2, 2:3 ONLY. Raw article as prompt — NO style prefix.
-- **Video**: Replicate Minimax Video-01 ($0.50/28s) — ONLY accessible video model on Replicate (Seedance, Wan 2.2, Kling, CogVideoX all 403/404 or on fal.ai which is balance-exhausted). Duration: up to 28s. Aspect: 9:16 or 1:1. Prompt_optimizer: true.
-- **Voice**: Fish Audio ($15/1M chars) vs ElevenLabs ($22/month) = 98.8% savings. Replicate XTTS-v2 deprecated — use Fish Audio primary.
-- **Primary stack**: Replicate handles images (GPT Image 2) + video (Minimax Video-01). OpenRouter handles text (gemini-2.5-flash).
+### Media Generation Pipeline (fal-first, May 2026)
+**All media goes through fal.ai. Replicate has been removed entirely.**
+- **Images**: `fal-ai/openai/gpt-image-2` — medium ~$0.04, high $0.16 at 1920x1080. Valid sizes via `image_size: {width, height}` (multiples of 16, max 3840 edge) or presets. Raw article as prompt — no style prefix.
+- **Video**: `fal-ai/kling-video/v2.5-turbo/pro/text-to-video` — $0.35 first 5s + $0.07/s. Ratios: 9:16 (short-form 1080x1920) or 16:9 (long-form 1920x1080). Single call max ~10s; chain + ffmpeg-stitch for longer.
+- **Voice**: **fish.audio S1** — `https://api.fish.audio/v1/tts`, `Bearer FISH_AUDIO_API_KEY`. ~$15/1M chars. User mandate: "for TTS we use fish.audio cause everything else is unacceptable shit." Wrapper: `lib/fish.py:synthesize`.
+- **Music**: `fal-ai/cassetteai/music-generator` (swappable via `model_slug` arg in `lib/fal.py:generate_music`).
+- **Primary stack**: fal handles images + video + music. fish.audio handles TTS. OpenRouter handles text (gemini-2.5-flash).
 
 **Image prompt strategy — raw article as prompt:**
 - Feed the FULL article text directly into the image generation model as the prompt (truncate to ~1000 chars for GPT Image 2)
@@ -334,8 +346,8 @@ async def publish_to_all_platforms(content, platforms):
 ### Pitfall: Not including costs in email notifications and Notion records
 **Solution**: Every email notification MUST include an itemized cost breakdown (article gen, image/video gen, total). Every Notion record MUST have `Cost` (number) and `Model` (select) properties. The user explicitly requires cost tracking on every post. Example email: "Costs: Article: $0.001 (gemini-2.5-flash) | Image: $0.047 (GPT Image 2) | Total: $0.048".
 
-### Pitfall: Using wrong video model on Replicate
-**Solution**: minimax/video-01 is the ONLY accessible video generation model. Seedance, Wan 2.2, Kling 1.6, CogVideoX all return 403/404 on standard Replicate API keys. Don't waste time trying them. fal.ai has Kling but balance exhausts fast. Minimax is reliable, $0.50 per 28s clip.
+### Pitfall: Reaching for Replicate
+**Solution**: Replicate is dead in this project. Burned $15 of generations that were never archived (May 2026). All media generation goes through `lib/fal.py`. If you find old code referencing `api.replicate.com` or the `replicate` Python package, rip it out and call the fal wrappers instead.
 
 ### Pitfall: Summarizing the article for the image prompt instead of using the full text
 **Solution**: Feed the raw article text directly into the image model as the prompt. Do NOT extract keywords, themes, or add style prefixes. The user directive is explicit: use the article as the prompt — no wrapper, no forced style. Truncate only if model rejects the length (~1000 chars for GPT Image 2).
