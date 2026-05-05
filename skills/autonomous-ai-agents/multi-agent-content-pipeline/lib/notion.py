@@ -24,8 +24,26 @@ from typing import Any, Optional
 import requests
 
 from .content_types import ContentPiece, ContentType
+from .platforms import LIMITS, needs_thread, split_thread
 
 log = logging.getLogger("zeus.notion")
+
+
+def _platform_caption(p: ContentPiece, platform: str) -> Optional[str]:
+    """Caption sent to a platform: same body, truncated to that platform's char limit."""
+    if not p.body:
+        return None
+    limit = LIMITS.get(platform)
+    return p.body[:limit] if limit else p.body
+
+
+def _twitter_archive_text(p: ContentPiece) -> Optional[str]:
+    """Twitter archive: thread joined with separators when body needs splitting, else first 280 chars."""
+    if not p.body:
+        return None
+    if needs_thread(p.body):
+        return "\n\n---\n\n".join(split_thread(p.body))
+    return p.body[: LIMITS["twitter"]]
 
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"  # 2025-09-03 silently drops props on database ops
@@ -207,18 +225,13 @@ class NotionArchive:
                     "Models Used": ("multi_select", p.models_used),
                     "Image URLs": ("rich_text", _trunc("\n".join(a.url for a in p.images))),
                     "Video URL": ("url", p.video.url if p.video else None),
-                    "Twitter": (
-                        "rich_text",
-                        p.variants.twitter
-                        or "\n\n---\n\n".join(p.variants.twitter_thread)
-                        or None,
-                    ),
-                    "Instagram": ("rich_text", p.variants.instagram),
-                    "LinkedIn": ("rich_text", p.variants.linkedin),
-                    "TikTok": ("rich_text", p.variants.tiktok),
-                    "YouTube": ("rich_text", p.variants.youtube),
-                    "Reddit": ("rich_text", p.variants.reddit),
-                    "Facebook": ("rich_text", p.variants.facebook),
+                    "Twitter": ("rich_text", _twitter_archive_text(p)),
+                    "Instagram": ("rich_text", _platform_caption(p, "instagram")),
+                    "LinkedIn": ("rich_text", _platform_caption(p, "linkedin")),
+                    "TikTok": ("rich_text", _platform_caption(p, "tiktok")),
+                    "YouTube": ("rich_text", _platform_caption(p, "youtube")),
+                    "Reddit": ("rich_text", _platform_caption(p, "reddit")),
+                    "Facebook": ("rich_text", _platform_caption(p, "facebook")),
                 }
             )
         out: dict = {}

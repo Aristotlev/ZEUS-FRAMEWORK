@@ -5,7 +5,6 @@ from .content_types import (
     ContentType,
     ContentPiece,
     GeneratedAsset,
-    PlatformVariants,
     PLATFORMS_BY_TYPE,
 )
 from .audio_mix import mix_audio_for_video
@@ -41,7 +40,6 @@ __all__ = [
     "ContentPiece",
     "mix_audio_for_video",
     "GeneratedAsset",
-    "PlatformVariants",
     "PLATFORMS_BY_TYPE",
     "FalError",
     "generate_image",

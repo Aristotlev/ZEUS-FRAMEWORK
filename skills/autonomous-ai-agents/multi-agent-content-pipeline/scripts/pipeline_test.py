@@ -47,8 +47,8 @@ from lib import (  # noqa: E402
     ContentPiece,
     ContentType,
     GeneratedAsset,
+    LIMITS,
     NotionArchive,
-    PlatformVariants,
     download,
     generate_image,
     generate_video_kling,
@@ -58,7 +58,6 @@ from lib import (  # noqa: E402
     needs_thread,
     send_pipeline_summary,
     split_thread,
-    validate_lengths,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -187,93 +186,14 @@ def generate_article_text(topic: str, content_type: ContentType) -> tuple[str, s
     return title, body
 
 
-def generate_variants(piece: ContentPiece) -> None:
-    """Fill piece.variants for each target platform via a single JSON-mode LLM call."""
-    targets = piece.target_platforms
-    constraints = []
-    if "twitter" in targets:
-        if needs_thread(piece.body):
-            constraints.append(
-                "twitter_thread: an array of strings (each <=270 chars), splitting the article into a thread on sentence boundaries"
-            )
-        else:
-            constraints.append("twitter: <=270 chars, punchy")
-    if "instagram" in targets:
-        constraints.append("instagram: 600-2000 chars, hook in first 125 chars, hashtag block at the end")
-    if "linkedin" in targets:
-        constraints.append("linkedin: 800-2500 chars, professional tone, hook in first 210 chars")
-    if "tiktok" in targets:
-        constraints.append("tiktok: 200-500 chars, hook in first 80 chars, 2-3 hashtags")
-    if "youtube" in targets:
-        constraints.append("youtube: 300-900 chars description, hook in first 100 chars")
-    if "reddit" in targets:
-        constraints.append("reddit: 800-3000 chars, no hashtags, plain markdown")
-    if "facebook" in targets:
-        constraints.append("facebook: 600-1500 chars, hook in first 480 chars")
+def caption_for(piece: ContentPiece, platform: str) -> str:
+    """Same article body for every platform, truncated to that platform's char limit.
 
-    prompt = (
-        f"You are formatting a piece of content for multiple platforms.\n"
-        f"{_niche_clause()}"
-        f"TITLE: {piece.title}\n\n"
-        f"ARTICLE:\n{piece.body}\n\n"
-        f"Output ONLY valid JSON with these keys (omit keys not in the constraint list):\n"
-        + "\n".join(f"- {c}" for c in constraints)
-        + "\n\nUse the same facts as the article. Vary phrasing per platform to avoid duplicate-content flags."
-    )
-    raw = openrouter_chat(prompt, max_tokens=1500, json_mode=True)
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        # Retry once with a stricter framing. If we fall through to raw-body
-        # fallback like before, Twitter ends up posting the article body cut
-        # into 270-char chunks — exactly what produced the generic-tweet bug.
-        log.warning("variants: model returned non-JSON; retrying once with stricter prompt")
-        retry_prompt = (
-            "Your previous response was not valid JSON. Output ONLY a single JSON object, "
-            "no prose, no markdown code fences, no commentary. Start with { and end with }.\n\n"
-            + prompt
-        )
-        raw = openrouter_chat(retry_prompt, max_tokens=1500, json_mode=True)
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as e:
-            # Abort the run before any publishing step. Generation cost is already
-            # on the ledger via ledger_checkpoint, so this failure is visible.
-            raise RuntimeError(
-                "variant generation failed: OpenRouter returned non-JSON twice in a row; "
-                "refusing to fall back to raw article body (would post unstructured text "
-                "to every platform). Inspect OpenRouter response for cause."
-            ) from e
-
-    v = piece.variants
-    v.twitter = data.get("twitter")
-    if "twitter_thread" in data and isinstance(data["twitter_thread"], list):
-        v.twitter_thread = [str(t) for t in data["twitter_thread"]]
-    elif needs_thread(piece.body) and not v.twitter_thread:
-        v.twitter_thread = split_thread(piece.body)
-    v.instagram = data.get("instagram")
-    v.linkedin = data.get("linkedin")
-    v.tiktok = data.get("tiktok")
-    v.youtube = data.get("youtube")
-    v.reddit = data.get("reddit")
-    v.facebook = data.get("facebook")
-
-    text_cost = 0.0015 if needs_thread(piece.body) else 0.001
-    piece.add_cost(ORCHESTRATOR_MODEL, text_cost, kind="text")
-
-    errors = validate_lengths(
-        {
-            "twitter": v.twitter or "",
-            "instagram": v.instagram or "",
-            "linkedin": v.linkedin or "",
-            "tiktok": v.tiktok or "",
-            "youtube": v.youtube or "",
-            "reddit": v.reddit or "",
-            "facebook": v.facebook or "",
-        }
-    )
-    if errors:
-        log.warning(f"variant length issues: {errors}")
+    User mandate: no per-platform LLM rewrites. Twitter's thread case is handled
+    separately in publish() via split_thread(piece.body).
+    """
+    limit = LIMITS.get(platform, len(piece.body))
+    return piece.body[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +442,10 @@ def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 360, poll_int
         if not account:
             continue
         # match by account + first 40 chars of the text we scheduled
-        snippet = _platform_text(piece, platform) or piece.body
+        if platform == "twitter" and needs_thread(piece.body):
+            snippet = split_thread(piece.body)[0]
+        else:
+            snippet = caption_for(piece, platform) or piece.body
         post_id = _publer_find_post_id(account, snippet)
         if post_id:
             pending[platform] = post_id
@@ -578,20 +501,22 @@ def publish(piece: ContentPiece) -> None:
             log.warning(f"no PUBLER_{platform.upper()}_ID configured -- skipping {platform}")
             continue
 
-        # Twitter thread: use the thread endpoint when we have multiple tweets
-        if platform == "twitter" and piece.variants.twitter_thread:
+        # Twitter thread: split the article body deterministically when it
+        # exceeds Twitter's per-tweet budget. No LLM call.
+        if platform == "twitter" and needs_thread(piece.body):
+            tweets = split_thread(piece.body)
             try:
-                job_id = _publer_schedule_thread(account, piece.variants.twitter_thread, media_ids)
+                job_id = _publer_schedule_thread(account, tweets, media_ids)
                 piece.publer_job_ids[platform] = job_id
-                log.info(f"  -> twitter thread ({len(piece.variants.twitter_thread)} tweets), job_id={job_id}")
+                log.info(f"  -> twitter thread ({len(tweets)} tweets), job_id={job_id}")
             except Exception as e:
                 log.error(f"  !! twitter thread failed: {e}")
                 piece.publer_job_ids[platform] = f"FAILED: {e}"
             continue
 
-        text = _platform_text(piece, platform)
+        text = caption_for(piece, platform)
         if not text:
-            log.warning(f"no variant text for {platform} -- skipping")
+            log.warning(f"empty body for {platform} -- skipping")
             continue
         if piece.video:
             ptype = "reel" if platform == "instagram" else "video"
@@ -641,14 +566,6 @@ def publish(piece: ContentPiece) -> None:
     )
 
 
-def _platform_text(piece: ContentPiece, platform: str) -> str | None:
-    v = piece.variants
-    if platform == "twitter":
-        if v.twitter_thread:
-            # Publer first-tweet-only fallback: post the lead tweet, full thread saved in Notion.
-            return v.twitter_thread[0]
-        return v.twitter
-    return getattr(v, platform, None)
 
 
 # ---------------------------------------------------------------------------
@@ -672,9 +589,6 @@ def run(
     title, body = generate_article_text(topic, content_type)
     piece = ContentPiece(content_type=content_type, title=title, body=body, topic=topic, audio_mode=audio_mode)
     log.info(f"  text -> title='{title}' body={len(body)}c")
-
-    generate_variants(piece)
-    log.info(f"  variants -> {[k for k in vars(piece.variants) if getattr(piece.variants, k)]}")
 
     generate_media_for(piece, slides=slides, video_seconds=duration)
     log.info(

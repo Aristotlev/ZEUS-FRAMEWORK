@@ -18,6 +18,9 @@ from enum import Enum
 from typing import Literal, Optional
 from uuid import uuid4
 
+# Unified-caption mandate: every platform receives the same caption (article
+# body), truncated to its own char limit. No per-platform LLM rewrites.
+
 
 class ContentType(str, Enum):
     ARTICLE = "article"
@@ -55,18 +58,6 @@ class GeneratedAsset:
 
 
 @dataclass
-class PlatformVariants:
-    twitter: Optional[str] = None
-    twitter_thread: list[str] = field(default_factory=list)
-    instagram: Optional[str] = None
-    linkedin: Optional[str] = None
-    tiktok: Optional[str] = None
-    youtube: Optional[str] = None
-    facebook: Optional[str] = None
-    reddit: Optional[str] = None
-
-
-@dataclass
 class ContentPiece:
     content_type: ContentType
     title: str
@@ -78,8 +69,6 @@ class ContentPiece:
     images: list[GeneratedAsset] = field(default_factory=list)
     video: Optional[GeneratedAsset] = None
     audio: Optional[GeneratedAsset] = None
-
-    variants: PlatformVariants = field(default_factory=PlatformVariants)
 
     created_at: datetime = field(default_factory=datetime.utcnow)
     posted_at: Optional[datetime] = None

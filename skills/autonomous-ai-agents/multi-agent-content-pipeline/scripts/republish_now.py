@@ -19,7 +19,7 @@ SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent))
 
 from lib import (  # noqa: E402
-    ContentPiece, ContentType, GeneratedAsset, PlatformVariants,
+    ContentPiece, ContentType, GeneratedAsset,
     NotionArchive, send_pipeline_summary, ledger_append,
 )
 
