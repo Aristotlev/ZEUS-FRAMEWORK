@@ -46,7 +46,9 @@
       "Bash(git branch *)",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(cat ~/.hermes/zeus_cost_ledger.jsonl 2>/dev/null | tail -5)",
+      "Read(//Users/aristotelesbasilakos/.hermes/**)"
     ]
   }
 }

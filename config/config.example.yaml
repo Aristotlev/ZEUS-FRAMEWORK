@@ -13,7 +13,7 @@ fallback_model:
 
 fallback_model_3:
   provider: openrouter
-  model: anthropic/claude-sonnet-4
+  model: deepseek/deepseek-v4-pro
 
 toolsets:
   - hermes-cli
@@ -52,8 +52,8 @@ display:
 memory:
   memory_enabled: true
   user_profile_enabled: true
-  memory_char_limit: 2200
-  user_char_limit: 1375
+  memory_char_limit: 12000
+  user_char_limit: 6000
   provider: mnemosyne
   nudge_interval: 10
   flush_min_turns: 6

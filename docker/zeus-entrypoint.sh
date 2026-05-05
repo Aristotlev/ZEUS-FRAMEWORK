@@ -65,7 +65,7 @@ fi
 
 # ── config.yaml ──────────────────────────────────────────────────────────────
 if [ ! -f "$HERMES_HOME/config.yaml" ]; then
-    ZEUS_MODEL="${ZEUS_MODEL:-anthropic/claude-sonnet-4}"
+    ZEUS_MODEL="${ZEUS_MODEL:-deepseek/deepseek-v4-pro}"
     cat > "$HERMES_HOME/config.yaml" <<EOF
 # Zeus Framework — Docker config (auto-generated)
 model:

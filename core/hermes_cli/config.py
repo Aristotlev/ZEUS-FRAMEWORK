@@ -115,7 +115,7 @@ def get_managed_update_command() -> Optional[str]:
 
 def recommended_update_command() -> str:
     """Return the best update command for the current installation."""
-    return get_managed_update_command() or "hermes update"
+    return get_managed_update_command() or "zeus update"
 
 
 def format_managed_message(action: str = "modify this Hermes installation") -> str:
@@ -2149,7 +2149,7 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                 "Change to:\n"
                 "  fallback_model:\n"
                 "    provider: openrouter\n"
-                "    model: anthropic/claude-sonnet-4",
+                "    model: deepseek/deepseek-v4-pro",
             ))
         elif fb:
             if not fb.get("provider"):
@@ -2162,7 +2162,7 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                 issues.append(ConfigIssue(
                     "warning",
                     "fallback_model is missing 'model' field — fallback will be disabled",
-                    "Add: model: anthropic/claude-sonnet-4 (or another model)",
+                    "Add: model: deepseek/deepseek-v4-pro (or another model)",
                 ))
 
     # ── Check for fallback_model accidentally nested inside custom_providers ──
@@ -3014,7 +3014,7 @@ _FALLBACK_COMMENT = """
 #
 # fallback_model:
 #   provider: openrouter
-#   model: anthropic/claude-sonnet-4
+#   model: deepseek/deepseek-v4-pro
 """
 
 
@@ -3045,7 +3045,7 @@ _COMMENTED_SECTIONS = """
 #
 # fallback_model:
 #   provider: openrouter
-#   model: anthropic/claude-sonnet-4
+#   model: deepseek/deepseek-v4-pro
 """
 
 
@@ -3762,7 +3762,7 @@ def config_command(args):
             print("Usage: hermes config set <key> <value>")
             print()
             print("Examples:")
-            print("  hermes config set model anthropic/claude-sonnet-4")
+            print("  hermes config set model deepseek/deepseek-v4-pro")
             print("  hermes config set terminal.backend docker")
             print("  hermes config set OPENROUTER_API_KEY sk-or-...")
             sys.exit(1)
