@@ -3079,6 +3079,20 @@ class HermesCLI:
             self.agent = None
             self._active_agent_route_signature = None
 
+        # Surface the resolved routing on every change so divergence between
+        # environments (Claude Code's terminal vs a plain Ubuntu shell, etc.) is
+        # visible in agent.log instead of silently picking the wrong provider.
+        try:
+            cc_token_present = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
+            logger.info(
+                "agent routing resolved: provider=%s model=%s base_url=%s cwd=%s "
+                "claude_code_oauth_token_in_env=%s",
+                resolved_provider, self.model, base_url, os.getcwd(),
+                cc_token_present,
+            )
+        except Exception:
+            pass
+
         return True
 
     def _resolve_turn_agent_config(self, user_message: str) -> dict:
@@ -6078,8 +6092,13 @@ class HermesCLI:
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
                         try:
+                            # Pin /bin/bash + explicit cwd so behavior is identical across
+                            # parent shells (sh/dash/zsh/Claude Code's terminal). Without
+                            # this, a project path containing spaces (e.g. "ZEUS FRAMEWORK")
+                            # gets word-split differently in each environment.
                             result = subprocess.run(
-                                exec_cmd, shell=True, capture_output=True,
+                                exec_cmd, shell=True, executable="/bin/bash",
+                                cwd=os.getcwd(), capture_output=True,
                                 text=True, timeout=30
                             )
                             output = result.stdout.strip() or result.stderr.strip()

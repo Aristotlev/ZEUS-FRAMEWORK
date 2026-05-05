@@ -53,6 +53,7 @@ from lib import (  # noqa: E402
     generate_image,
     generate_video_kling,
     ledger_append,
+    ledger_checkpoint,
     mix_audio_for_video,
     needs_thread,
     send_pipeline_summary,
@@ -87,6 +88,46 @@ IMAGE_SPECS = {
     ContentType.CAROUSEL: (1024, 1024, "medium"),
     # videos don't use images directly, but a thumbnail is generated for the Notion record
 }
+
+
+# ---------------------------------------------------------------------------
+# Niche loading — pulls content_pipeline.niche from ~/.hermes/config.yaml.
+# Without this the LLM produces generic copy regardless of what the user's
+# pipeline is actually about (finance/crypto/stocks/forex/geopolitics, etc.).
+# ---------------------------------------------------------------------------
+def _load_niche() -> list[str]:
+    cfg_path = pathlib.Path(os.path.expanduser("~/.hermes/config.yaml"))
+    if not cfg_path.exists():
+        return []
+    try:
+        import yaml  # type: ignore
+
+        with cfg_path.open() as fh:
+            cfg = yaml.safe_load(fh) or {}
+        niche = (cfg.get("content_pipeline") or {}).get("niche") or []
+        if isinstance(niche, str):
+            niche = [niche]
+        return [str(n).strip() for n in niche if str(n).strip()]
+    except Exception as e:  # pyyaml missing or malformed file — degrade to no-niche, log loudly
+        log.warning(f"niche: could not read {cfg_path} ({e}); proceeding without niche context")
+        return []
+
+
+NICHE: list[str] = _load_niche()
+if NICHE:
+    log.info(f"niche: {', '.join(NICHE)}")
+else:
+    log.warning("niche: empty — content will be generic. Set content_pipeline.niche in ~/.hermes/config.yaml")
+
+
+def _niche_clause() -> str:
+    if not NICHE:
+        return ""
+    return (
+        f"\nDOMAIN: this piece is for a {' / '.join(NICHE)} audience. "
+        f"Use vocabulary, references, tickers, and framing native to those fields. "
+        f"No generic platitudes — be specific to the domain.\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +170,8 @@ def generate_article_text(topic: str, content_type: ContentType) -> tuple[str, s
         ContentType.LONG_VIDEO: "700-1200",
     }[content_type]
     prompt = (
-        f"Write a sharp, data-driven post about: {topic}\n\n"
+        f"Write a sharp, data-driven post about: {topic}\n"
+        f"{_niche_clause()}"
         f"Format:\n"
         f"- First line: a punchy 5-10 word title (no dates).\n"
         f"- Body: {target_chars} characters. The body must be long enough that Instagram, "
@@ -170,7 +212,8 @@ def generate_variants(piece: ContentPiece) -> None:
         constraints.append("facebook: 600-1500 chars, hook in first 480 chars")
 
     prompt = (
-        f"You are formatting a piece of content for multiple platforms.\n\n"
+        f"You are formatting a piece of content for multiple platforms.\n"
+        f"{_niche_clause()}"
         f"TITLE: {piece.title}\n\n"
         f"ARTICLE:\n{piece.body}\n\n"
         f"Output ONLY valid JSON with these keys (omit keys not in the constraint list):\n"
@@ -181,8 +224,26 @@ def generate_variants(piece: ContentPiece) -> None:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        log.warning("variants: model returned non-JSON, falling back to raw body for all platforms")
-        data = {p: piece.body for p in targets}
+        # Retry once with a stricter framing. If we fall through to raw-body
+        # fallback like before, Twitter ends up posting the article body cut
+        # into 270-char chunks — exactly what produced the generic-tweet bug.
+        log.warning("variants: model returned non-JSON; retrying once with stricter prompt")
+        retry_prompt = (
+            "Your previous response was not valid JSON. Output ONLY a single JSON object, "
+            "no prose, no markdown code fences, no commentary. Start with { and end with }.\n\n"
+            + prompt
+        )
+        raw = openrouter_chat(retry_prompt, max_tokens=1500, json_mode=True)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            # Abort the run before any publishing step. Generation cost is already
+            # on the ledger via ledger_checkpoint, so this failure is visible.
+            raise RuntimeError(
+                "variant generation failed: OpenRouter returned non-JSON twice in a row; "
+                "refusing to fall back to raw article body (would post unstructured text "
+                "to every platform). Inspect OpenRouter response for cause."
+            ) from e
 
     v = piece.variants
     v.twitter = data.get("twitter")
@@ -248,6 +309,7 @@ def _gen_article_image(piece: ContentPiece, out_dir: pathlib.Path) -> None:
         GeneratedAsset(url=url, kind="image", width=w, height=h, model="gpt-image-2", cost_usd=cost, local_path=local)
     )
     piece.add_cost("gpt-image-2", cost, kind="image")
+    ledger_checkpoint(piece, "article_image_generated")
 
 
 def _gen_carousel_images(piece: ContentPiece, out_dir: pathlib.Path, slides: int) -> None:
@@ -269,6 +331,7 @@ def _gen_carousel_images(piece: ContentPiece, out_dir: pathlib.Path, slides: int
             )
         )
         piece.add_cost("gpt-image-2", cost, kind="image")
+        ledger_checkpoint(piece, f"carousel_slide_{i + 1}_generated")
 
 
 def _carousel_slide_prompts(piece: ContentPiece, slides: int) -> list[str]:
@@ -308,6 +371,7 @@ def _gen_video(piece: ContentPiece, out_dir: pathlib.Path, aspect: str, duration
         local_path=local,
     )
     piece.add_cost("kling-v2.5-turbo-pro", cost, kind="video")
+    ledger_checkpoint(piece, "video_generated")
 
     if piece.audio_mode:
         final_path, audio_costs = mix_audio_for_video(
@@ -317,6 +381,7 @@ def _gen_video(piece: ContentPiece, out_dir: pathlib.Path, aspect: str, duration
             piece.video.local_path = final_path
         for model, model_cost in audio_costs.items():
             piece.add_cost(model, model_cost, kind="audio")
+        ledger_checkpoint(piece, "audio_mixed")
 
 
 # ---------------------------------------------------------------------------
@@ -541,11 +606,39 @@ def publish(piece: ContentPiece) -> None:
             piece.publer_job_ids[platform] = f"FAILED: {e}"
 
     piece.posted_at = datetime.now(timezone.utc)
-    piece.status = "posted" if piece.publer_job_ids else "failed"
 
     # Wait for each scheduled post to actually go live, then capture its permalink.
     # 6-minute window covers our 2-min schedule offset + Publer lag + slow platforms.
     _wait_for_posts_live(piece, max_wait_s=360, poll_interval_s=15)
+
+    # Status reflects ACTUAL outcome, not Publer's "we accepted your schedule request"
+    # response. A platform is confirmed only when _wait_for_posts_live captured a real
+    # post_link in publer_job_ids[f"{platform}_url"].
+    attempted = [p for p in piece.target_platforms if p in piece.publer_job_ids]
+    confirmed: list[str] = []
+    failed: list[str] = []
+    for platform in attempted:
+        if str(piece.publer_job_ids.get(platform, "")).startswith("FAILED"):
+            failed.append(platform)
+            continue
+        url = str(piece.publer_job_ids.get(f"{platform}_url", ""))
+        if url and not url.startswith("FAILED") and not url.startswith("pending"):
+            confirmed.append(platform)
+        else:
+            failed.append(platform)
+
+    if not attempted:
+        piece.status = "failed"
+    elif confirmed and not failed:
+        piece.status = "posted"
+    elif confirmed:
+        piece.status = "partial"
+    else:
+        piece.status = "failed"
+    log.info(
+        f"  publish outcome: status={piece.status} "
+        f"confirmed={confirmed or '[]'} failed={failed or '[]'}"
+    )
 
 
 def _platform_text(piece: ContentPiece, platform: str) -> str | None:
