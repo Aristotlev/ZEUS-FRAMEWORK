@@ -8,13 +8,18 @@ Override per-run with ``--niche "a,b,c"``.
 Idempotent: removes any existing ``zeus-content-*`` jobs before recreating,
 so re-running this updates the prompts/schedules without duplicating.
 
-Creates three jobs:
-  1. zeus-content-article-slot  — every 4-6h: generate + post one long-form
+Creates these jobs:
+  1. zeus-content-article-slot   — every 4-6h: generate + post one long-form
      article on the freshest story in your niche.
      Fires at 04:00, 08:00, 12:00, 17:00, 21:00, 00:00 (server local time).
-  2. zeus-content-notion-ideas  — daily 07:00: process team-submitted ideas
-     from the Notion content database, draft articles, schedule via Publer.
-  3. zeus-content-daily-crawl   — daily 06:00: crawl the day's top headlines
+  2. zeus-content-carousel-slot  — twice daily (00:30 / 12:30): one carousel.
+  3. zeus-content-notion-ideas   — every 30 min: pulls "New" rows from the
+     Notion Content Ideas DB through scripts/ingest_ideas.py, distills each
+     into a drafted piece in the archive DB. Auto-publishes drafts whose
+     "Auto Publish" checkbox is on (chains into job 4).
+  4. zeus-content-publish-ready  — every 10 min: ships every archive row
+     whose Status is "Ready to Publish" via scripts/publish_from_notion.py.
+  5. zeus-content-daily-crawl    — daily 06:00: crawl the day's top headlines
      across the niche, build a content brief, queue stories for the day.
 
 Run from anywhere:
@@ -140,14 +145,31 @@ def _build_jobs(niche: List[str]):
     )
 
     notion_ideas = (
-        f"Process new team-submitted {phrase} ideas in the Notion content "
-        f"ideas database (entries with no 'processed' tag). For each: "
-        f"research, draft 1200-2000 words, generate a header image, "
-        f"schedule via Publer at the next available slot in today's "
-        f"calendar (08:00/12:00/17:00/21:00/00:00/04:00), then tag the "
-        f"Notion entry 'processed' with links. If zero new ideas, exit "
-        f"immediately with a one-line email — no generation cost."
-        + common_outro
+        "Run the Content Ideas ingester via execute_code: "
+        "`python skills/autonomous-ai-agents/multi-agent-content-pipeline/"
+        "scripts/ingest_ideas.py --once`. The script reads 'New' rows from "
+        "the Notion Content Ideas DB, distills each (URL / YouTube / text) "
+        "into a drafted archive page, and (when 'Auto Publish' is checked) "
+        "flips the archive row to 'Ready to Publish' for the publish-ready "
+        "job to ship. If the script reports zero new ideas, exit silently — "
+        "no email, no further work. Otherwise email a one-line summary "
+        "listing the compiled archive page URLs. Do NOT do any drafting in "
+        "your own context — the script handles all generation, archival, "
+        "ledger, and notification. Your job is just to invoke it and "
+        "summarize."
+    )
+
+    publish_ready = (
+        "Run the on-demand publisher via execute_code: "
+        "`python skills/autonomous-ai-agents/multi-agent-content-pipeline/"
+        "scripts/publish_from_notion.py --once`. The script reads archive "
+        "rows whose Status is 'Ready to Publish', regenerates any missing "
+        "media, ships through Publer, and lets the publish_watcher resolve "
+        "permalinks out-of-process. If zero rows are ready, exit silently. "
+        "Otherwise email a one-line summary of which pieces were scheduled. "
+        "Do NOT draft, regenerate, or modify content in your own context — "
+        "the script is the entire pipeline. Your job is just to invoke it "
+        "and summarize."
     )
 
     daily_crawl = (
@@ -174,8 +196,17 @@ def _build_jobs(niche: List[str]):
         },
         {
             "name": "zeus-content-notion-ideas",
-            "schedule": "0 7 * * *",
+            # Every 30 min — the script no-ops on an empty queue, so
+            # frequent polling is cheap and means new rows compile quickly.
+            "schedule": "*/30 * * * *",
             "prompt": notion_ideas,
+        },
+        {
+            "name": "zeus-content-publish-ready",
+            # Every 10 min — Aris flips a Draft to "Ready to Publish" and
+            # within ~10 min Zeus picks it up + ships through Publer.
+            "schedule": "*/10 * * * *",
+            "prompt": publish_ready,
         },
         {
             "name": "zeus-content-daily-crawl",

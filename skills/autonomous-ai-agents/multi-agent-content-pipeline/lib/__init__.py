@@ -42,6 +42,13 @@ from .publish_queue import (
     is_past_deadline as publish_is_past_deadline,
 )
 from .email_notify import send_pipeline_summary
+from .ideas import (
+    ExtractedIdea,
+    classify as classify_idea_source,
+    extract as extract_idea,
+    fetch_url as fetch_idea_url,
+    fetch_youtube as fetch_idea_youtube,
+)
 
 __all__ = [
     "AudioMode",
@@ -78,4 +85,9 @@ __all__ = [
     "publish_archive_done",
     "publish_hydrate",
     "publish_is_past_deadline",
+    "ExtractedIdea",
+    "classify_idea_source",
+    "extract_idea",
+    "fetch_idea_url",
+    "fetch_idea_youtube",
 ]

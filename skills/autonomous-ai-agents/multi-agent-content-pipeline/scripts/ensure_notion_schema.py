@@ -66,6 +66,11 @@ _AUDIO_MODE_OPTIONS = [
 
 _STATUS_OPTIONS = [
     {"name": "Draft"},
+    # User-flipped trigger: publish_from_notion.py picks rows in this state and
+    # ships them. The script flips the row to "Publishing" before doing work,
+    # then publish() leaves it in "Scheduled" / "Posted" / "Failed".
+    {"name": "Ready to Publish"},
+    {"name": "Publishing"},
     {"name": "Scheduled"},
     {"name": "Media Generated"},
     {"name": "Media Partial"},
