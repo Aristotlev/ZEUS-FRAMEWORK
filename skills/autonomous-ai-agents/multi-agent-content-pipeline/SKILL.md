@@ -74,11 +74,10 @@ Route by complexity, not content type:
 - The raw article text IS the prompt — the model interprets it naturally
 - This produces images that are unique and varied based on the content, not locked to one visual style
 
-**Platform variant generation — single-call optimization:**
-- Generate ALL platform variants in ONE LLM call (Twitter, Instagram, LinkedIn, TikTok)
-- Request JSON output with `response_format: {"type": "json_object"}`
-- Prompt for platform-specific constraints inline (char limits, tone, hashtag strategy)
-- This is 4x faster and 4x cheaper than separate calls per platform
+**Platform description — unified, no variants:**
+- All platforms use the same description (article body, max 1500 chars)
+- No LLM call for variant generation — zero extra cost and latency
+- Truncate body to 1500 chars: `caption = piece.body[:1500]`
 
 ### 4. State Machine Database
 PostgreSQL with status enum pipeline:
@@ -208,15 +207,20 @@ Content Output → WhatsApp Cloud API → WhatsApp
 ### Article → Image Pipeline
 **CRITICAL: The article text IS the image prompt.** Do not summarize, rephrase, or extract themes. Feed the full article text directly into the image generation model as the prompt. Truncate only if the model has a hard token limit (Flux Schnell accepts ~400 chars comfortably). This ensures visual coherence with the written content.
 
-### Platform Optimization
-Every piece of content gets platform-specific variants generated alongside the article:
-- **Twitter**: 280 chars max, punchy, zero hashtags unless natural
-- **Instagram**: visual-first caption, up to 2200 chars, relevant hashtags footer
-- **LinkedIn**: professional tone, 2+ paragraphs, industry depth
-- **TikTok**: 150 chars max, short punchy, 2-3 hashtags
-- **YouTube**: community post format, engaging question/prompt
+### Platform Description — Unified (No Variants)
+**All platforms receive the same description.** No per-platform rewrites. No separate LLM call. The article body is used directly as the post caption across every platform.
 
-Generate all variants in a single LLM call with `response_format: json_object` for speed.
+- **Article**: 380-400 chars
+- **Long Article**: 1400-1500 chars
+- **Carousel**: 380-400 chars (3-5 images as swipe post, all share one caption)
+- **Short/Long Video**: body = narration script (300-500 / 700-1200 chars)
+- Truncate to stated limit if over. Never generate per-platform rewrites.
+- Same text to Twitter, Instagram, LinkedIn, TikTok, YouTube.
+- No token waste, no variant generation step.
+
+```python
+caption = piece.body[:1500]  # same for all platforms
+```
 
 ### Post-Content Save to Google Docs
 After every publish, save the full article + all platform variants + image URL + publish results to Google Docs. The content file at `~/.hermes/latest_content.json` is the staging area. Google OAuth setup required once (see google-workspace skill).
@@ -277,15 +281,20 @@ Content Output → WhatsApp Cloud API → WhatsApp
 ### Article → Image Pipeline
 **CRITICAL: The article text IS the image prompt.** Do not summarize, rephrase, or extract themes. Feed the full article text directly into the image generation model as the prompt. Truncate only if the model has a hard token limit (Flux Schnell accepts ~400 chars comfortably). This ensures visual coherence with the written content.
 
-### Platform Optimization
-Every piece of content gets platform-specific variants generated alongside the article:
-- **Twitter**: 280 chars max, punchy, zero hashtags unless natural
-- **Instagram**: visual-first caption, up to 2200 chars, relevant hashtags footer
-- **LinkedIn**: professional tone, 2+ paragraphs, industry depth
-- **TikTok**: 150 chars max, short punchy, 2-3 hashtags
-- **YouTube**: community post format, engaging question/prompt
+### Platform Description — Unified (No Variants)
+**All platforms receive the same description.** No per-platform rewrites. No separate LLM call. The article body is used directly as the post caption across every platform.
 
-Generate all variants in a single LLM call with `response_format: json_object` for speed.
+- **Article**: 380-400 chars
+- **Long Article**: 1400-1500 chars
+- **Carousel**: 380-400 chars (3-5 images as swipe post, all share one caption)
+- **Short/Long Video**: body = narration script (300-500 / 700-1200 chars)
+- Truncate to stated limit if over. Never generate per-platform rewrites.
+- Same text to Twitter, Instagram, LinkedIn, TikTok, YouTube.
+- No token waste, no variant generation step.
+
+```python
+caption = piece.body[:1500]  # same for all platforms
+```
 
 ### Post-Content Save to Google Docs
 After every publish, save the full article + all platform variants + image URL + publish results to Google Docs. The content file at `~/.hermes/latest_content.json` is the staging area. Google OAuth setup required once (see google-workspace skill).
@@ -355,8 +364,8 @@ async def publish_to_all_platforms(content, platforms):
 ### Pitfall: Saving content to Google Docs without OAuth setup
 **Solution**: Google Workspace OAuth is one-time setup. Check auth first (`setup.py --check`). If unauthenticated, guide user through the OAuth flow before attempting saves. Content can be staged in `~/.hermes/latest_content.json` until auth is ready.
 
-### Pitfall: Generated content lacks platform optimization
-**Solution**: Dedicated formatting agents that understand platform-specific requirements
+### Pitfall: Generating per-platform variants
+**Solution**: Do NOT generate platform variants. All platforms use the same description (article body, max 1500 chars). No separate LLM call needed. `caption = piece.body[:1500]`
 
 ### Pitfall: DeepSeek V4 Pro returns null content via OpenRouter
 **Solution**: Use `google/gemini-2.5-flash` or `deepseek/deepseek-chat` instead. Test model availability before committing to it for content generation.
