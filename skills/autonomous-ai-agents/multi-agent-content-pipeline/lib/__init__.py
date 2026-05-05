@@ -28,7 +28,11 @@ from .platforms import (
     validate_lengths,
     meets_read_more,
 )
-from .ledger import append_entry as ledger_append, summary as ledger_summary
+from .ledger import (
+    append_entry as ledger_append,
+    append_checkpoint as ledger_checkpoint,
+    summary as ledger_summary,
+)
 from .email_notify import send_pipeline_summary
 
 __all__ = [
@@ -57,6 +61,7 @@ __all__ = [
     "validate_lengths",
     "meets_read_more",
     "ledger_append",
+    "ledger_checkpoint",
     "ledger_summary",
     "send_pipeline_summary",
 ]

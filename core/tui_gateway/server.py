@@ -2264,7 +2264,7 @@ def _(rid, params: dict) -> dict:
     if name in qcmds:
         qc = qcmds[name]
         if qc.get("type") == "exec":
-            r = subprocess.run(qc.get("command", ""), shell=True, capture_output=True, text=True, timeout=30)
+            r = subprocess.run(qc.get("command", ""), shell=True, executable="/bin/bash", cwd=os.getcwd(), capture_output=True, text=True, timeout=30)
             output = ((r.stdout or "") + ("\n" if r.stdout and r.stderr else "") + (r.stderr or "")).strip()[:4000]
             if r.returncode != 0:
                 return _err(rid, 4018, output or f"quick command failed with exit code {r.returncode}")
@@ -3075,7 +3075,7 @@ def _(rid, params: dict) -> dict:
     except ImportError:
         pass
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd())
+        r = subprocess.run(cmd, shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=30, cwd=os.getcwd())
         return _ok(rid, {"stdout": r.stdout[-4000:], "stderr": r.stderr[-2000:], "code": r.returncode})
     except subprocess.TimeoutExpired:
         return _err(rid, 5002, "command timed out (30s)")

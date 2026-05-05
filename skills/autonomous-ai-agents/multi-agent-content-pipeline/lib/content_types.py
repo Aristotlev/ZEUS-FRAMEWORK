@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Literal, Optional
+from uuid import uuid4
 
 
 class ContentType(str, Enum):
@@ -84,7 +85,11 @@ class ContentPiece:
     posted_at: Optional[datetime] = None
     publer_job_ids: dict[str, str] = field(default_factory=dict)
     notion_page_id: Optional[str] = None
-    status: Literal["draft", "media_generated", "posted", "failed"] = "draft"
+    # Stable id for the lifetime of this run. Lets the cost ledger correlate
+    # checkpoint rows (written after each fal generation) with the final row,
+    # so a run that crashed mid-pipeline still has its leaked spend on disk.
+    run_id: str = field(default_factory=lambda: uuid4().hex[:12])
+    status: str = "draft"  # draft | media_generated | posted | partial | failed | checkpoint:<phase>
 
     cost_breakdown: dict[str, float] = field(default_factory=dict)
 

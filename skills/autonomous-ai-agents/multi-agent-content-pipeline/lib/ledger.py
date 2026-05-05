@@ -34,14 +34,29 @@ LEDGER_PATH = Path(os.path.expanduser("~/.hermes/zeus_cost_ledger.jsonl"))
 
 
 def append_entry(piece: ContentPiece) -> dict:
-    """Append a row for `piece` to the ledger. Returns the row that was written."""
+    """Append the FINAL row for `piece` to the ledger. Returns the row that was written."""
+    return _write_row(piece, status_override=None)
+
+
+def append_checkpoint(piece: ContentPiece, phase: str) -> dict:
+    """
+    Append a CHECKPOINT row right after a paid step (fal image/video, etc.) so the
+    cost survives even if the pipeline later crashes (Notion failure, JSON decode
+    failure, network drop). Final row from append_entry will share the same run_id
+    and supersede earlier checkpoints in summary().
+    """
+    return _write_row(piece, status_override=f"checkpoint:{phase}")
+
+
+def _write_row(piece: ContentPiece, status_override: Optional[str]) -> dict:
     LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
     row = {
         "ts": datetime.utcnow().isoformat(),
+        "run_id": getattr(piece, "run_id", None),
         "content_type": piece.content_type.value,
         "topic": piece.topic,
         "title": piece.title,
-        "status": piece.status,
+        "status": status_override if status_override is not None else piece.status,
         "total_cost_usd": piece.total_cost,
         "cost_breakdown": dict(piece.cost_breakdown),
         "models": piece.models_used,
@@ -73,17 +88,46 @@ def _read_all() -> list[dict]:
 def summary(window_days: Optional[int] = None) -> dict:
     """
     Summarize ledger over the last `window_days` (None = all-time).
-    Returns: {total_usd, runs, by_type: {...}, by_model: {...}, top_topics: [...]}
+
+    Dedupe semantics: rows are grouped by run_id. If a final row exists for a run
+    (status not starting with 'checkpoint:'), it supersedes any checkpoint rows for
+    the same run. If only checkpoint rows exist, the LATEST checkpoint represents
+    the leaked spend for that run and is counted toward total_cost_usd but tagged
+    as 'leaked' (not a completed run).
+
+    Rows from before run_id was introduced (no run_id field) are treated as their
+    own group keyed by ts so the historical ledger still parses cleanly.
+
+    Returns: {total_usd, runs, leaked_runs, leaked_cost_usd, by_type, by_model}
     """
     rows = _read_all()
     if window_days is not None:
         cutoff = datetime.utcnow() - timedelta(days=window_days)
         rows = [r for r in rows if _parse_ts(r.get("ts")) >= cutoff]
 
-    total = sum(float(r.get("total_cost_usd") or 0) for r in rows)
+    grouped: dict[str, list[dict]] = {}
+    for r in rows:
+        key = r.get("run_id") or f"_legacy:{r.get('ts')}"
+        grouped.setdefault(key, []).append(r)
+
+    chosen: list[tuple[dict, bool]] = []  # (row, is_leaked)
+    for run_rows in grouped.values():
+        finals = [r for r in run_rows if not str(r.get("status", "")).startswith("checkpoint:")]
+        if finals:
+            finals.sort(key=lambda r: _parse_ts(r.get("ts")))
+            chosen.append((finals[-1], False))
+        else:
+            run_rows.sort(key=lambda r: _parse_ts(r.get("ts")))
+            chosen.append((run_rows[-1], True))
+
+    total = sum(float(r.get("total_cost_usd") or 0) for r, _ in chosen)
+    leaked_cost = sum(float(r.get("total_cost_usd") or 0) for r, leaked in chosen if leaked)
+    leaked_runs = sum(1 for _, leaked in chosen if leaked)
+    completed_runs = len(chosen) - leaked_runs
+
     by_type: dict[str, dict] = {}
     by_model: dict[str, float] = {}
-    for r in rows:
+    for r, _ in chosen:
         ct = r.get("content_type", "unknown")
         by_type.setdefault(ct, {"runs": 0, "cost_usd": 0.0})
         by_type[ct]["runs"] += 1
@@ -94,8 +138,10 @@ def summary(window_days: Optional[int] = None) -> dict:
 
     return {
         "window_days": window_days,
-        "runs": len(rows),
+        "runs": completed_runs,
+        "leaked_runs": leaked_runs,
         "total_cost_usd": round(total, 4),
+        "leaked_cost_usd": round(leaked_cost, 4),
         "by_type": {k: {"runs": v["runs"], "cost_usd": round(v["cost_usd"], 4)} for k, v in by_type.items()},
         "by_model": {k: round(v, 4) for k, v in sorted(by_model.items(), key=lambda x: -x[1])},
     }

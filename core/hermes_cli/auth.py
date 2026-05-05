@@ -325,10 +325,19 @@ def get_anthropic_key() -> str:
     ``PROVIDER_REGISTRY["anthropic"].api_key_env_vars`` tuple:
 
         ANTHROPIC_API_KEY -> ANTHROPIC_TOKEN -> CLAUDE_CODE_OAUTH_TOKEN
+
+    If the user has NOT explicitly configured anthropic (e.g. their
+    config.yaml has ``model.provider: openrouter``), we skip
+    ``CLAUDE_CODE_OAUTH_TOKEN``.  That env var is auto-set by Claude Code's
+    terminal — silently using it would route Zeus's calls through Claude
+    Code's billing despite the user choosing OpenRouter / DeepSeek / etc.
     """
     from hermes_cli.config import get_env_value
 
+    explicit = is_provider_explicitly_configured("anthropic")
     for var in PROVIDER_REGISTRY["anthropic"].api_key_env_vars:
+        if var == "CLAUDE_CODE_OAUTH_TOKEN" and not explicit:
+            continue
         value = get_env_value(var) or os.getenv(var, "")
         if value:
             return value
