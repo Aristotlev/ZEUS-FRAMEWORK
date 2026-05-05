@@ -1,0 +1,41 @@
+# ============================================================================
+# Zeus Framework — Caddy reverse proxy (auto-TLS via Let's Encrypt)
+# ============================================================================
+# Set ZEUS_DOMAIN and ACME_EMAIL in deploy/.env.prod.
+# Caddy handles cert issuance + renewal automatically.
+# ============================================================================
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$ZEUS_DOMAIN} {
+	encode zstd gzip
+
+	# Health probe (no auth) — for UptimeRobot etc.
+	handle /health {
+		reverse_proxy status:8000
+	}
+
+	# Webhook receiver (auth handled inside the app via ZEUS_TRIGGER_TOKEN)
+	handle /webhook/* {
+		reverse_proxy status:8000
+	}
+
+	# Remote trigger (auth handled inside the app)
+	handle /trigger/* {
+		reverse_proxy status:8000
+	}
+
+	# Status dashboard + everything else
+	handle {
+		reverse_proxy status:8000
+	}
+
+	# Sensible logs
+	log {
+		output stdout
+		format console
+		level INFO
+	}
+}

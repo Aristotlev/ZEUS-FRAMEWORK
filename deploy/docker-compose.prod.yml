@@ -1,0 +1,138 @@
+# ============================================================================
+# Zeus Framework — Production overrides
+# ============================================================================
+# Use with the base file:
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d
+#
+# Differences vs the base file:
+#   - Replaces the agent entrypoint with one that bootstraps + heartbeats
+#     (no interactive Hermes REPL; container stays alive for `docker exec`)
+#   - Adds healthchecks + resource limits + always-restart on the agent
+#   - Postgres tuned down for a 4 GB box
+#   - Adds Caddy (auto-TLS reverse proxy) + status (FastAPI dashboard)
+# The repo's bind mounts (skills, plugins/mnemosyne, soul/SOUL.md) are kept —
+# they let you `git pull` on the box and have skills update without a rebuild.
+# ============================================================================
+
+services:
+
+  redis:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgres:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - max_connections=20
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  zeus:
+    restart: unless-stopped
+    stdin_open: false
+    tty: false
+    # Bootstrap data volume (same as zeus-entrypoint.sh) then run a
+    # heartbeat loop instead of an interactive Hermes REPL. Cron jobs
+    # are registered via `docker exec zeus-agent setup_content_cron.py`
+    # after first boot — see deploy/README.md.
+    entrypoint: ["/usr/local/bin/zeus-prod-entrypoint.sh"]
+    volumes:
+      - zeus-hermes-data:/opt/data
+      - ./deploy/zeus-prod-entrypoint.sh:/usr/local/bin/zeus-prod-entrypoint.sh:ro
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /opt/data/.heartbeat && find /opt/data/.heartbeat -mmin -30 | grep -q ."]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    environment:
+      ZEUS_DOMAIN: ${ZEUS_DOMAIN}
+      ZEUS_TRIGGER_TOKEN: ${ZEUS_TRIGGER_TOKEN}
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ── Caddy — auto-TLS reverse proxy ───────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: zeus-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - zeus-caddy-data:/data
+      - zeus-caddy-config:/config
+    environment:
+      ZEUS_DOMAIN: ${ZEUS_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    depends_on:
+      - status
+    networks:
+      - zeus-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Status — FastAPI dashboard / webhooks / remote trigger ───────────────────
+  status:
+    build:
+      context: ./deploy/status
+      dockerfile: Dockerfile
+    image: zeus-status:latest
+    container_name: zeus-status
+    restart: unless-stopped
+    environment:
+      ZEUS_TRIGGER_TOKEN: ${ZEUS_TRIGGER_TOKEN}
+      HERMES_HOME: /opt/data
+    volumes:
+      # Shared with the agent — reads ledger/queue/heartbeat, writes webhook logs
+      - zeus-hermes-data:/opt/data
+      # Docker socket so /trigger can exec into the zeus container
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - zeus-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  zeus-caddy-data:
+  zeus-caddy-config:

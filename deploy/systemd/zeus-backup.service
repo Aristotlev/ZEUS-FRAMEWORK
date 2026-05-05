@@ -1,0 +1,14 @@
+[Unit]
+Description=Zeus Framework — daily backup (postgres + data volume + B2)
+Requires=docker.service
+After=zeus.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/zeus
+EnvironmentFile=/opt/zeus/deploy/.env.prod
+ExecStart=/usr/bin/bash /opt/zeus/deploy/backup/backup.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=900

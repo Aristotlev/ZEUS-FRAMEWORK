@@ -1,0 +1,11 @@
+[Unit]
+Description=Zeus Framework — daily backup timer
+
+[Timer]
+# Daily at 03:30 UTC, with up to 30min jitter to avoid thundering herd on B2
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
