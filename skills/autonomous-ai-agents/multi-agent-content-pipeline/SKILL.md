@@ -358,6 +358,40 @@ async def publish_to_all_platforms(content, platforms):
 ### Pitfall: Reaching for Replicate
 **Solution**: Replicate is dead in this project. Burned $15 of generations that were never archived (May 2026). All media generation goes through `lib/fal.py`. If you find old code referencing `api.replicate.com` or the `replicate` Python package, rip it out and call the fal wrappers instead.
 
+### Pitfall: Money spent but content lost (orphan generations)
+**Symptom**: pipeline crashes mid-run, fal/fish bills for what was generated, but no Notion row exists and bytes vanish — the user has no idea what was generated or where it went. Drove the May 2026 incident: $0.45 on GPT Image 2 with only 2 images to show.
+
+**Solution**: orchestrator now follows an **artifact-first** flow:
+1. Stable artifact dir at `~/.hermes/zeus_artifacts/<run_id>_<topic>/` is created BEFORE any paid call. Never `/tmp` — OS reaps it.
+2. Notion row is archived **early** (right after text-gen) so even a crash mid-media leaves a row pointing at the run_id + artifact dir.
+3. `generate_media_for(...)` is wrapped in try/except. On failure, status flips to `media_partial` (some assets) or `failed` (none) and the run continues to:
+4. `archive.update_assets(piece)` patches Notion with whatever URLs/blocks WERE captured.
+5. `ledger_append(piece)` writes the final row (supersedes checkpoints).
+6. `send_pipeline_summary(piece)` emails — with a red `Run did NOT complete cleanly` banner if applicable, plus the artifact dir path and asset URLs.
+
+The exception is re-raised at the end so callers still see the failure.
+
+### Pitfall: Pipeline blocks ~6 min per run polling Publer for live URLs
+**Solution**: `publish()` is non-blocking by default — it schedules every platform in parallel via `ThreadPoolExecutor`, sets `status="scheduled"`, and enqueues the run for `scripts/publish_watcher.py` via `lib/publish_queue.py`. The watcher polls Publer out-of-process, captures permalinks, patches Notion via `update_status`, writes the final ledger row, and sends the "posts live" email. Run the watcher from cron (`*/2 * * * * publish_watcher.py --once`) or as a daemon (`publish_watcher.py --daemon`). Pass `--wait-for-live` to `pipeline_test.py` to keep the old blocking behavior for debugging.
+
+### Pitfall: Carousel image gen is the slowest step
+**Solution**: `_gen_carousel_images` runs all N slides through `ThreadPoolExecutor(max_workers=slides)` — fal's queue handles concurrent jobs fine. Cuts a 4-slide carousel from ~4 min sequential to ~60s parallel. Same pattern for fish narration + fal music in `audio_mix.py` (was sequential, now overlapped).
+
+### Pitfall: No data on where pipeline time actually goes
+**Solution**: Every `run()` records per-phase wall-clock to `piece.phase_durations_ms` (`text_gen`, `notion_archive_early`, `media_gen`, `notion_assets`, `publish`). Persisted in the ledger. `ledger_summary()` returns `timing_by_type` (p50/p90/max per content type) and `timing_by_phase` (p50/p90 per phase) — optimization is data-driven instead of guessed.
+
+### Pitfall: Cost rollups don't match reality
+**Solution**: ledger now writes per-paid-call **checkpoint rows** (already in place) AND tracks `artifact_dir`, `asset_urls`, `asset_local_paths`, plus a `cost_sources` map tagging each cost line as `actual` or `estimate`. `ledger_summary()` returns `total_cost_usd`, `leaked_cost_usd`, `actual_cost_usd`, `estimated_cost_usd`, `accuracy_pct`. Email shows `Last 30d: $4.20 (12 runs, 2 leaked $0.45) Accuracy 87% (actual $3.65, est $0.55)`.
+
+**Per-provider accuracy:**
+- **OpenRouter**: `usage.cost` captured per call → `actual` (the dollar amount they billed). Driven by `"usage": {"include": True}` in the request body.
+- **fish.audio**: char-count × published rate IS their billing primitive → `actual`. Side log at `~/.hermes/zeus_fish_calls.jsonl`.
+- **fal.ai (image/video/music)**: standard response has no cost field → `estimate` from local price table. Every call is side-logged at `~/.hermes/zeus_fal_calls.jsonl` with request_id + response payload. `lib/fal.py` also tries to extract `cost` / `metrics.cost` / `pricing.charge` from the response and prefers any actual it finds.
+
+**Closing the gap:**
+- `scripts/orphan_sweep.py` — leaked / failed runs with their on-disk bytes
+- `scripts/fal_reconcile.py` — pulls fal billing actuals (or summarizes the side log if billing API is dashboard-only) and writes deltas to `~/.hermes/zeus_fal_reconciled.jsonl`
+
 ### Pitfall: Summarizing the article for the image prompt instead of using the full text
 **Solution**: Feed the raw article text directly into the image model as the prompt. Do NOT extract keywords, themes, or add style prefixes. The user directive is explicit: use the article as the prompt — no wrapper, no forced style. Truncate only if model rejects the length (~1000 chars for GPT Image 2).
 

@@ -178,6 +178,81 @@ class NotionArchive:
         log.info(f"  archived to Notion: {page_id}")
         return page_id
 
+    def update_assets(self, piece: ContentPiece) -> None:
+        """
+        Patch the page with currently-captured media (image URLs, video URL, cost,
+        models, status, run_id, local artifact dir) and append image/video blocks
+        for every asset on the piece.
+
+        Designed to be called once after media generation (or after a partial crash
+        in the orchestrator's finally block). Re-calling will append duplicate
+        blocks, so callers should call at most once per page; properties are
+        overwritten, not duplicated.
+        """
+        if not piece.notion_page_id:
+            log.warning("update_assets called but piece has no notion_page_id")
+            return
+        schema = self._get_db_schema()
+        wanted: dict[str, tuple[str, Any]] = {
+            "Status": ("select", _humanize_status(piece.status)),
+            "Cost USD": ("number", piece.total_cost),
+            "Models Used": ("multi_select", piece.models_used),
+            "Image URLs": ("rich_text", _trunc("\n".join(a.url for a in piece.images))),
+            "Video URL": ("url", piece.video.url if piece.video else None),
+            "Local Artifact Dir": ("rich_text", piece.local_artifact_dir),
+            "Artifact Dir": ("rich_text", piece.local_artifact_dir),
+            "Run ID": ("rich_text", piece.run_id),
+        }
+        props: dict = {}
+        for name, (kind, value) in wanted.items():
+            if name not in schema:
+                continue
+            if value is None or value == "" or value == []:
+                continue
+            if schema[name].get("type") != kind:
+                continue
+            props[name] = _format_property(kind, value)
+        if props:
+            r = requests.patch(
+                f"{NOTION_API}/pages/{piece.notion_page_id}",
+                headers=self.headers,
+                json={"properties": props},
+                timeout=15,
+            )
+            if r.status_code >= 400:
+                log.error(f"Notion update_assets props failed {r.status_code}: {r.text[:300]}")
+                r.raise_for_status()
+
+        children: list[dict] = []
+        for img in piece.images:
+            if not img.url:
+                continue
+            children.append(
+                {
+                    "object": "block",
+                    "type": "image",
+                    "image": {"type": "external", "external": {"url": img.url}},
+                }
+            )
+        if piece.video and piece.video.url:
+            children.append(
+                {
+                    "object": "block",
+                    "type": "video",
+                    "video": {"type": "external", "external": {"url": piece.video.url}},
+                }
+            )
+        if children:
+            r = requests.patch(
+                f"{NOTION_API}/blocks/{piece.notion_page_id}/children",
+                headers=self.headers,
+                json={"children": children},
+                timeout=20,
+            )
+            if r.status_code >= 400:
+                log.error(f"Notion update_assets blocks failed {r.status_code}: {r.text[:300]}")
+                r.raise_for_status()
+
     def update_status(self, piece: ContentPiece) -> None:
         """Patch the piece's existing Notion page with current status / posted_at / job ids."""
         if not piece.notion_page_id:

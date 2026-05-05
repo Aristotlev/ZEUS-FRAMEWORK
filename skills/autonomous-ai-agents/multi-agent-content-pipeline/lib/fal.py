@@ -13,12 +13,72 @@ Install: pip install fal-client
 """
 from __future__ import annotations
 
+import json as _json
 import logging
 import os
 import urllib.request
-from typing import Literal, Optional
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal, Optional
 
 log = logging.getLogger("zeus.fal")
+
+FAL_CALL_LOG = Path(os.path.expanduser("~/.hermes/zeus_fal_calls.jsonl"))
+
+
+def _log_fal_call(
+    *,
+    run_id: Optional[str],
+    model: str,
+    request_id: Optional[str],
+    declared_cost_usd: float,
+    cost_source: str,
+    inputs: dict,
+    response_excerpt: dict,
+) -> None:
+    """
+    Append one row per paid fal call. This is the reconciliation audit trail —
+    `scripts/fal_reconcile.py` reads it to cross-check against fal billing.
+    Never raise from here; logging failures must not kill a paid generation.
+    """
+    try:
+        FAL_CALL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "ts": datetime.utcnow().isoformat(),
+            "run_id": run_id,
+            "model": model,
+            "request_id": request_id,
+            "declared_cost_usd": round(float(declared_cost_usd or 0), 6),
+            "cost_source": cost_source,
+            "inputs": inputs,
+            "response_excerpt": response_excerpt,
+        }
+        with FAL_CALL_LOG.open("a") as fh:
+            fh.write(_json.dumps(row, default=str) + "\n")
+    except Exception as e:  # pragma: no cover
+        log.warning(f"fal call-log write failed: {e}")
+
+
+def _extract_fal_cost(payload: Any) -> tuple[Optional[float], str]:
+    """
+    Try to find a billed cost in a fal response. Some fal models include
+    `metrics.cost`, `cost`, or `pricing.charge` — prefer any of those over
+    the local price table. Returns (cost, source) where source is
+    "actual" if found, "" if not.
+    """
+    if not isinstance(payload, dict):
+        return None, ""
+    for k in ("cost", "billed_cost", "charge"):
+        v = payload.get(k)
+        if isinstance(v, (int, float)):
+            return float(v), "actual"
+    metrics = payload.get("metrics") or payload.get("pricing") or {}
+    if isinstance(metrics, dict):
+        for k in ("cost", "billed_cost", "charge", "amount_usd"):
+            v = metrics.get(k)
+            if isinstance(v, (int, float)):
+                return float(v), "actual"
+    return None, ""
 
 try:
     import fal_client  # type: ignore
@@ -70,6 +130,7 @@ def generate_image(
     height: int = 1024,
     quality: Literal["low", "medium", "high"] = "medium",
     output_format: Literal["png", "jpeg", "webp"] = "png",
+    run_id: Optional[str] = None,
 ) -> tuple[str, float]:
     """Returns (image_url, cost_usd). Uses REST API directly (fal SDK has a polling bug with openai/ models)."""
     import time as _time
@@ -125,7 +186,24 @@ def generate_image(
     images = result.get("images", [])
     if not images:
         raise FalError(f"GPT Image 2 returned no images: {result}")
-    cost = GPT_IMAGE_2_PRICE.get(((width, height), quality), 0.0)
+
+    # Prefer fal-reported cost if present; fall back to the local price table.
+    actual_cost, src = _extract_fal_cost(result)
+    if actual_cost is not None:
+        cost, cost_source = actual_cost, "actual"
+    else:
+        cost = GPT_IMAGE_2_PRICE.get(((width, height), quality), 0.0)
+        cost_source = "estimate"
+    _log_fal_call(
+        run_id=run_id,
+        model="gpt-image-2",
+        request_id=request_id,
+        declared_cost_usd=cost,
+        cost_source=cost_source,
+        inputs={"width": width, "height": height, "quality": quality, "output_format": output_format,
+                "prompt_excerpt": prompt[:200]},
+        response_excerpt={k: result.get(k) for k in ("seed", "timings", "metrics", "pricing", "cost") if k in result},
+    )
     return images[0]["url"], cost
 
 
@@ -134,6 +212,7 @@ def generate_video_kling(
     aspect_ratio: Literal["9:16", "16:9", "1:1"] = "9:16",
     duration_s: int = 5,
     negative_prompt: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> tuple[str, float]:
     """
     Single-call Kling 2.5 Turbo Pro generation. Returns (video_url, cost_usd).
@@ -157,13 +236,29 @@ def generate_video_kling(
     url = video.get("url") if isinstance(video, dict) else None
     if not url:
         raise FalError(f"Kling returned no video: {result}")
-    return url, kling_cost(duration_s)
+    actual_cost, _ = _extract_fal_cost(result if isinstance(result, dict) else {})
+    if actual_cost is not None:
+        cost, cost_source = actual_cost, "actual"
+    else:
+        cost = kling_cost(duration_s)
+        cost_source = "estimate"
+    _log_fal_call(
+        run_id=run_id,
+        model="kling-v2.5-turbo-pro",
+        request_id=(result.get("request_id") if isinstance(result, dict) else None),
+        declared_cost_usd=cost,
+        cost_source=cost_source,
+        inputs={"aspect_ratio": aspect_ratio, "duration_s": duration_s, "prompt_excerpt": prompt[:200]},
+        response_excerpt={k: result.get(k) for k in ("metrics", "pricing", "cost") if isinstance(result, dict) and k in result},
+    )
+    return url, cost
 
 
 def generate_music(
     prompt: str,
     duration_s: int = 30,
     model_slug: str = "fal-ai/cassetteai/music-generator",
+    run_id: Optional[str] = None,
 ) -> tuple[str, float]:
     """
     Background music generation. Default model is cassetteai/music-generator.
@@ -182,7 +277,21 @@ def generate_music(
     url = audio.get("url") if isinstance(audio, dict) else audio
     if not url:
         raise FalError(f"Music model returned no audio: {result}")
-    return url, 0.05  # conservative; refine once real billing observed
+    actual_cost, _ = _extract_fal_cost(result if isinstance(result, dict) else {})
+    if actual_cost is not None:
+        cost, cost_source = actual_cost, "actual"
+    else:
+        cost, cost_source = 0.05, "estimate"  # conservative; refine via fal_reconcile
+    _log_fal_call(
+        run_id=run_id,
+        model=model_slug,
+        request_id=(result.get("request_id") if isinstance(result, dict) else None),
+        declared_cost_usd=cost,
+        cost_source=cost_source,
+        inputs={"duration_s": duration_s, "prompt_excerpt": prompt[:200]},
+        response_excerpt={k: result.get(k) for k in ("metrics", "pricing", "cost") if isinstance(result, dict) and k in result},
+    )
+    return url, cost
 
 
 def download(url: str, dest_path: str) -> str:

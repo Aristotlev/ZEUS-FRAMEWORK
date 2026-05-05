@@ -13,8 +13,11 @@ We track an estimate per call so the cost ledger has something concrete.
 """
 from __future__ import annotations
 
+import json as _json
 import logging
 import os
+from datetime import datetime
+from pathlib import Path
 from typing import Literal, Optional
 
 import requests
@@ -22,7 +25,39 @@ import requests
 log = logging.getLogger("zeus.fish")
 
 FISH_API = "https://api.fish.audio/v1/tts"
+FISH_CALL_LOG = Path(os.path.expanduser("~/.hermes/zeus_fish_calls.jsonl"))
 DEFAULT_MODEL = "s1"  # s1 = $15/1M chars; s2-pro is the premium tier
+
+
+def _log_fish_call(
+    *,
+    run_id: Optional[str],
+    model: str,
+    chars: int,
+    cost_usd: float,
+    out_path: str,
+    response_headers: dict,
+) -> None:
+    """Append a row per fish.audio call so cost can be reconciled vs fish account billing."""
+    try:
+        FISH_CALL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "ts": datetime.utcnow().isoformat(),
+            "run_id": run_id,
+            "model": model,
+            "chars": chars,
+            "cost_usd": round(float(cost_usd or 0), 6),
+            # Per-character pricing IS fish.audio's billing primitive, so this
+            # cost is treated as actual upstream by callers.
+            "cost_source": "actual",
+            "out_path": out_path,
+            "response_headers": {k: response_headers.get(k) for k in
+                                 ("x-request-id", "x-fish-request-id", "x-billing-units") if k in response_headers},
+        }
+        with FISH_CALL_LOG.open("a") as fh:
+            fh.write(_json.dumps(row, default=str) + "\n")
+    except Exception as e:  # pragma: no cover
+        log.warning(f"fish call-log write failed: {e}")
 
 # Voice presets — populate via reference_id from fish.audio voice library.
 # Set ZEUS_FISH_VOICE_DEFAULT in .env to override.
@@ -48,6 +83,7 @@ def synthesize(
     mp3_bitrate: int = 128,
     speed: float = 1.0,
     temperature: float = 0.7,
+    run_id: Optional[str] = None,
 ) -> tuple[str, float]:
     """
     Generate narration with fish.audio. Writes binary audio to `out_path`.
@@ -84,4 +120,13 @@ def synthesize(
         fh.write(r.content)
 
     cost = (len(text) / 1_000_000.0) * PRICE_PER_MILLION_CHARS.get(model, 15.0)
-    return out_path, round(cost, 6)
+    cost = round(cost, 6)
+    _log_fish_call(
+        run_id=run_id,
+        model=model,
+        chars=len(text),
+        cost_usd=cost,
+        out_path=out_path,
+        response_headers=dict(r.headers),
+    )
+    return out_path, cost

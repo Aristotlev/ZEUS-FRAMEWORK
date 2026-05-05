@@ -84,15 +84,33 @@ def mix_audio_for_video(
     music_path: Optional[str] = None
     narration_path: Optional[str] = None
 
-    if volumes["music"] > 0:
-        music_prompt = _generate_music_prompt(piece)
-        music_url, music_cost = generate_music(music_prompt, duration_s=int(video_duration) + 2)
-        music_path = download(music_url, str(out / "music.mp3"))
-        costs["cassetteai/music-generator"] = music_cost
+    # Music (fal cassetteai) and narration (fish.audio) are independent paid
+    # API calls; running them in parallel cuts ~15-30s off every video run.
+    from concurrent.futures import ThreadPoolExecutor
 
-    if volumes["narration"] > 0:
+    def _mk_music() -> tuple[Optional[str], float]:
+        if volumes["music"] <= 0:
+            return None, 0.0
+        prompt = _generate_music_prompt(piece)
+        url, cost = generate_music(
+            prompt, duration_s=int(video_duration) + 2, run_id=piece.run_id,
+        )
+        return download(url, str(out / "music.mp3")), cost
+
+    def _mk_narration() -> tuple[Optional[str], float]:
+        if volumes["narration"] <= 0:
+            return None, 0.0
         text = narration_text or piece.body or piece.topic
-        narration_path, narration_cost = synthesize(text, str(out / "narration.mp3"))
+        return synthesize(text, str(out / "narration.mp3"), run_id=piece.run_id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_music = pool.submit(_mk_music)
+        f_narration = pool.submit(_mk_narration)
+        music_path, music_cost = f_music.result()
+        narration_path, narration_cost = f_narration.result()
+    if music_cost:
+        costs["cassetteai/music-generator"] = music_cost
+    if narration_cost:
         costs["fish-audio/s1"] = narration_cost
 
     final_path = str(out / "video_final.mp4")

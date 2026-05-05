@@ -32,9 +32,9 @@ import logging
 import os
 import pathlib
 import sys
-import tempfile
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import requests
 
@@ -56,6 +56,7 @@ from lib import (  # noqa: E402
     ledger_checkpoint,
     mix_audio_for_video,
     needs_thread,
+    publish_enqueue,
     send_pipeline_summary,
     split_thread,
 )
@@ -132,7 +133,15 @@ def _niche_clause() -> str:
 # ---------------------------------------------------------------------------
 # OpenRouter text generation
 # ---------------------------------------------------------------------------
-def openrouter_chat(prompt: str, *, max_tokens: int = 800, json_mode: bool = False) -> str:
+def openrouter_chat(
+    prompt: str, *, max_tokens: int = 800, json_mode: bool = False
+) -> tuple[str, float, str]:
+    """
+    Call OpenRouter chat. Returns (text, cost_usd, source) where source is
+    "actual" if OpenRouter returned `usage.cost` in the response (the standard
+    behavior — this is the dollar amount they billed), or "estimate" if not
+    present (rare). Callers feed this into piece.add_cost(..., source=source).
+    """
     if not OPENROUTER_KEY:
         raise RuntimeError("OPENROUTER_API_KEY not set")
     body = {
@@ -140,6 +149,9 @@ def openrouter_chat(prompt: str, *, max_tokens: int = 800, json_mode: bool = Fal
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0.7,
+        # Force OpenRouter to include accounting fields. usage.cost is the
+        # dollar amount billed for THIS call — we record it as the actual.
+        "usage": {"include": True},
     }
     if json_mode:
         body["response_format"] = {"type": "json_object"}
@@ -153,14 +165,33 @@ def openrouter_chat(prompt: str, *, max_tokens: int = 800, json_mode: bool = Fal
         timeout=60,
     )
     r.raise_for_status()
-    text = r.json()["choices"][0]["message"]["content"]
+    payload = r.json()
+    text = payload["choices"][0]["message"]["content"]
     if not text:
         raise RuntimeError("OpenRouter returned empty content")
-    return text
+    usage = payload.get("usage") or {}
+    cost: Optional[float] = None
+    source = "estimate"
+    raw_cost = usage.get("cost")
+    if raw_cost is not None:
+        try:
+            cost = float(raw_cost)
+            source = "actual"
+        except (TypeError, ValueError):
+            cost = None
+    if cost is None:
+        # Cheap fallback: gemini-2.5-flash list price ~ $0.075/1M input, $0.30/1M output.
+        # Rough enough that the email shows SOMETHING, but flagged as estimate so
+        # the user knows to reconcile (or upgrade their OpenRouter response parsing).
+        prompt_tok = float(usage.get("prompt_tokens") or 0)
+        comp_tok = float(usage.get("completion_tokens") or 0)
+        cost = round((prompt_tok * 0.075 + comp_tok * 0.30) / 1_000_000.0, 6)
+    log.debug(f"openrouter cost={cost} source={source} usage={usage}")
+    return text, cost, source
 
 
-def generate_article_text(topic: str, content_type: ContentType) -> tuple[str, str]:
-    """Generate (title, body). Body length is tuned to clear 'read more' on every visual platform."""
+def generate_article_text(topic: str, content_type: ContentType) -> tuple[str, str, float, str]:
+    """Generate (title, body, cost_usd, cost_source). Body length tuned for 'read more' on every visual platform."""
     target_chars = {
         ContentType.ARTICLE: "250-450",
         ContentType.LONG_ARTICLE: "550-900",
@@ -179,11 +210,11 @@ def generate_article_text(topic: str, content_type: ContentType) -> tuple[str, s
         f"- Tone: Bloomberg Terminal condensed. Concrete numbers, sectors, take.\n"
         f"- No hashtags. No 'in conclusion'. No filler.\n"
     )
-    raw = openrouter_chat(prompt, max_tokens=800)
+    raw, cost, source = openrouter_chat(prompt, max_tokens=800)
     lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
     title = lines[0].lstrip("#").strip()
     body = "\n\n".join(lines[1:]) if len(lines) > 1 else raw
-    return title, body
+    return title, body, cost, source
 
 
 def caption_for(piece: ContentPiece, platform: str) -> str:
@@ -199,10 +230,50 @@ def caption_for(piece: ContentPiece, platform: str) -> str:
 # ---------------------------------------------------------------------------
 # Media generation
 # ---------------------------------------------------------------------------
+def _safe_topic(topic: str) -> str:
+    return "".join(c if c.isalnum() else "_" for c in topic)[:40] or "untitled"
+
+
+ARTIFACT_ROOT = pathlib.Path(os.path.expanduser("~/.hermes/zeus_artifacts"))
+
+
+class _Phase:
+    """
+    Context manager that records wall-clock duration of a pipeline phase onto
+    `piece.phase_durations_ms`. Multiple usages of the same phase name accumulate.
+    Lets ledger_summary() report p50/p90 latency per phase + content type so
+    optimization decisions are data-driven instead of guessed.
+    """
+
+    def __init__(self, piece: ContentPiece, name: str):
+        self.piece = piece
+        self.name = name
+
+    def __enter__(self):
+        self._start = time.monotonic()
+        return self
+
+    def __exit__(self, *exc):
+        ms = int((time.monotonic() - self._start) * 1000)
+        d = self.piece.phase_durations_ms
+        d[self.name] = d.get(self.name, 0) + ms
+        return False
+
+
 def _local_dir(piece: ContentPiece) -> pathlib.Path:
-    safe = "".join(c if c.isalnum() else "_" for c in piece.topic)[:40]
-    out = pathlib.Path(tempfile.gettempdir()) / "zeus_content" / f"{int(time.time())}_{safe}"
+    """
+    Return the stable on-disk artifact dir for `piece`. NEVER uses /tmp — bytes
+    must survive process death and OS reaping so a crashed run can be recovered.
+    `run()` sets piece.local_artifact_dir before any paid call; this function
+    falls back to creating one lazily for direct callers.
+    """
+    if piece.local_artifact_dir:
+        out = pathlib.Path(piece.local_artifact_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        return out
+    out = ARTIFACT_ROOT / f"{piece.run_id}_{_safe_topic(piece.topic)}"
     out.mkdir(parents=True, exist_ok=True)
+    piece.local_artifact_dir = str(out)
     return out
 
 
@@ -223,35 +294,68 @@ def generate_media_for(piece: ContentPiece, slides: int = 4, video_seconds: int 
 def _gen_article_image(piece: ContentPiece, out_dir: pathlib.Path) -> None:
     w, h, q = IMAGE_SPECS[ContentType.ARTICLE]
     prompt = piece.body[:1000]
-    url, cost = generate_image(prompt, width=w, height=h, quality=q)
+    url, cost = generate_image(prompt, width=w, height=h, quality=q, run_id=piece.run_id)
     local = download(url, str(out_dir / "image_1.png"))
     piece.images.append(
         GeneratedAsset(url=url, kind="image", width=w, height=h, model="gpt-image-2", cost_usd=cost, local_path=local)
     )
-    piece.add_cost("gpt-image-2", cost, kind="image")
+    # fal's standard response has no cost field for openai/gpt-image-2 — flagged
+    # as estimate so scripts/fal_reconcile.py can reconcile against fal billing.
+    piece.add_cost("gpt-image-2", cost, kind="image", source="estimate")
     ledger_checkpoint(piece, "article_image_generated")
 
 
 def _gen_carousel_images(piece: ContentPiece, out_dir: pathlib.Path, slides: int) -> None:
+    """
+    Generate the N carousel slides in parallel. fal's queue handles concurrent
+    jobs fine — sequentially this loop was the dominant carousel-pipeline cost
+    (~60s × N). With ThreadPoolExecutor it collapses to ~max-of-N (one slowest
+    slide). On exception in one slide, surviving slides still land on `piece`
+    and a checkpoint row is written before re-raising — so artifact-first
+    recovery still works.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     slides = max(3, min(5, slides))
     slide_prompts = _carousel_slide_prompts(piece, slides)
     w, h, q = IMAGE_SPECS[ContentType.CAROUSEL]
-    for i, sp in enumerate(slide_prompts):
-        url, cost = generate_image(sp, width=w, height=h, quality=q)
-        local = download(url, str(out_dir / f"slide_{i + 1}.png"))
-        piece.images.append(
-            GeneratedAsset(
-                url=url,
-                kind="image",
-                width=w,
-                height=h,
-                model="gpt-image-2",
-                cost_usd=cost,
-                local_path=local,
-            )
+
+    def _gen_one(idx: int, prompt: str) -> tuple[int, GeneratedAsset, float]:
+        url, cost = generate_image(prompt, width=w, height=h, quality=q, run_id=piece.run_id)
+        local = download(url, str(out_dir / f"slide_{idx + 1}.png"))
+        asset = GeneratedAsset(
+            url=url, kind="image", width=w, height=h,
+            model="gpt-image-2", cost_usd=cost, local_path=local,
         )
-        piece.add_cost("gpt-image-2", cost, kind="image")
-        ledger_checkpoint(piece, f"carousel_slide_{i + 1}_generated")
+        return idx, asset, cost
+
+    # Slot the slides into a fixed-size list so insertion order matches slide
+    # order regardless of completion order. Critical: slide 1 should be the
+    # hook visual, slide N the closer.
+    results: list[Optional[GeneratedAsset]] = [None] * slides
+    first_error: Optional[BaseException] = None
+
+    with ThreadPoolExecutor(max_workers=slides) as pool:
+        futures = {pool.submit(_gen_one, i, sp): i for i, sp in enumerate(slide_prompts)}
+        for fut in as_completed(futures):
+            try:
+                idx, asset, cost = fut.result()
+            except BaseException as e:
+                if first_error is None:
+                    first_error = e
+                log.error(f"  carousel slide {futures[fut] + 1} failed: {e}")
+                continue
+            results[idx] = asset
+            piece.add_cost("gpt-image-2", cost, kind="image", source="estimate")
+            ledger_checkpoint(piece, f"carousel_slide_{idx + 1}_generated")
+
+    # Append in order; skip empty slots from failed slides.
+    for asset in results:
+        if asset is not None:
+            piece.images.append(asset)
+
+    if first_error is not None:
+        raise first_error
 
 
 def _carousel_slide_prompts(piece: ContentPiece, slides: int) -> list[str]:
@@ -263,7 +367,8 @@ def _carousel_slide_prompts(piece: ContentPiece, slides: int) -> list[str]:
         f"depict key data points or beats from the article in order.\n\n"
         f"ARTICLE TITLE: {piece.title}\n\nARTICLE BODY:\n{piece.body}"
     )
-    raw = openrouter_chat(prompt, max_tokens=900, json_mode=True)
+    raw, cost, source = openrouter_chat(prompt, max_tokens=900, json_mode=True)
+    piece.add_cost(ORCHESTRATOR_MODEL, cost, kind="text", source=source)
     try:
         data = json.loads(raw)
         out = [str(s) for s in data.get("slides", [])]
@@ -277,7 +382,7 @@ def _carousel_slide_prompts(piece: ContentPiece, slides: int) -> list[str]:
 
 def _gen_video(piece: ContentPiece, out_dir: pathlib.Path, aspect: str, duration: int) -> None:
     prompt = piece.body[:800]
-    url, cost = generate_video_kling(prompt, aspect_ratio=aspect, duration_s=duration)
+    url, cost = generate_video_kling(prompt, aspect_ratio=aspect, duration_s=duration, run_id=piece.run_id)
     local = download(url, str(out_dir / "video.mp4"))
     width, height = (1080, 1920) if aspect == "9:16" else (1920, 1080)
     piece.video = GeneratedAsset(
@@ -290,7 +395,7 @@ def _gen_video(piece: ContentPiece, out_dir: pathlib.Path, aspect: str, duration
         cost_usd=cost,
         local_path=local,
     )
-    piece.add_cost("kling-v2.5-turbo-pro", cost, kind="video")
+    piece.add_cost("kling-v2.5-turbo-pro", cost, kind="video", source="estimate")
     ledger_checkpoint(piece, "video_generated")
 
     if piece.audio_mode:
@@ -300,7 +405,10 @@ def _gen_video(piece: ContentPiece, out_dir: pathlib.Path, aspect: str, duration
         if final_path != local:
             piece.video.local_path = final_path
         for model, model_cost in audio_costs.items():
-            piece.add_cost(model, model_cost, kind="audio")
+            # fish.audio bills per character — char count IS the actual billing
+            # primitive, so it's "actual". Music is fal-side, still "estimate".
+            src = "actual" if model.startswith("fish-audio") else "estimate"
+            piece.add_cost(model, model_cost, kind="audio", source=src)
         ledger_checkpoint(piece, "audio_mixed")
 
 
@@ -396,22 +504,30 @@ def _publer_schedule_thread(
 
 def _publer_find_post_id(account_id: str, text_snippet: str) -> str | None:
     """Find the most recent Publer post matching account_id + text snippet. Returns post id or None."""
+    def _norm(s: str) -> str:
+        # Normalize whitespace + case so Publer's text mangling (smart quotes,
+        # tracking-param re-encoding, leading emoji) doesn't break the match.
+        return " ".join((s or "").lower().split())
     try:
         r = requests.get(f"{PUBLER_BASE}/posts?limit=30", headers=_publer_headers(), timeout=15)
         if r.status_code != 200:
+            log.warning(f"Publer GET /posts returned {r.status_code}: {r.text[:200]}")
             return None
-        snippet = (text_snippet or "")[:40].strip()
-        for post in r.json().get("posts", []):
+        snippet_norm = _norm(text_snippet)[:40]
+        posts = r.json().get("posts", [])
+        # Pass 1: substring match on normalized text (handles Publer's text edits)
+        for post in posts:
             if post.get("account_id") != account_id:
                 continue
-            ptext = (post.get("text") or "").strip()
-            if snippet and ptext.startswith(snippet):
+            if snippet_norm and snippet_norm in _norm(post.get("text") or ""):
                 return post.get("id")
-        # fallback: most recent on the account
-        for post in r.json().get("posts", []):
+        # Pass 2: most recent post on this account (Publer returns newest-first)
+        for post in posts:
             if post.get("account_id") == account_id:
+                log.info(f"  Publer match fallback: most-recent post on account (snippet match failed)")
                 return post.get("id")
-    except Exception:
+    except Exception as e:
+        log.warning(f"_publer_find_post_id error: {e}")
         return None
     return None
 
@@ -427,10 +543,27 @@ def _publer_get_post(post_id: str) -> dict | None:
     return None
 
 
-def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 360, poll_interval_s: int = 15) -> None:
+def _extract_post_url(post: dict) -> str | None:
+    """Try every Publer URL field we've seen across accounts/platforms."""
+    for k in ("post_link", "url", "permalink", "public_url", "external_url", "social_url", "live_url"):
+        v = post.get(k)
+        if v and isinstance(v, str) and v.startswith("http"):
+            return v
+    # Some Publer responses nest under 'platform_data' or similar
+    nested = post.get("platform_data") or post.get("response") or {}
+    if isinstance(nested, dict):
+        for k in ("url", "permalink", "post_link"):
+            v = nested.get(k)
+            if v and isinstance(v, str) and v.startswith("http"):
+                return v
+    return None
+
+
+def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 720, poll_interval_s: int = 15) -> None:
     """
-    Poll Publer until each scheduled post goes live (state='posted' with post_link).
+    Poll Publer until each scheduled post goes live (state='posted' with a public URL).
     Mutates piece.publer_job_ids in place: adds '<platform>_url' for each live post.
+    Default 12-min window covers Publer's 2-min schedule offset + platform lag.
     """
     pending: dict[str, str] = {}  # platform -> publer_post_id
     for platform in piece.target_platforms:
@@ -441,7 +574,6 @@ def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 360, poll_int
         account = PUBLER_ACCOUNTS.get(platform)
         if not account:
             continue
-        # match by account + first 40 chars of the text we scheduled
         if platform == "twitter" and needs_thread(piece.body):
             snippet = split_thread(piece.body)[0]
         else:
@@ -450,6 +582,8 @@ def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 360, poll_int
         if post_id:
             pending[platform] = post_id
             log.info(f"  tracking {platform} -> publer_post_id={post_id}")
+        else:
+            log.warning(f"  could not resolve Publer post_id for {platform} (snippet match failed)")
 
     if not pending:
         log.warning("no Publer post IDs resolved; skipping live-wait")
@@ -457,31 +591,51 @@ def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 360, poll_int
 
     deadline = time.time() + max_wait_s
     log.info(f"  waiting up to {max_wait_s}s for {len(pending)} posts to go live...")
+    first_poll = True
     while pending and time.time() < deadline:
         time.sleep(poll_interval_s)
         for platform in list(pending.keys()):
             post = _publer_get_post(pending[platform])
             if not post:
                 continue
+            if first_poll:
+                # One-time diagnostic so we can see what Publer actually returns
+                log.info(f"  Publer post payload sample [{platform}]: keys={sorted(post.keys())[:20]}, state={post.get('state')!r}")
             state = post.get("state")
-            link = post.get("post_link") or post.get("url")
+            link = _extract_post_url(post)
             if state == "posted" and link:
                 piece.publer_job_ids[f"{platform}_url"] = link
                 log.info(f"  ✓ {platform} live: {link}")
                 pending.pop(platform)
+            elif state == "posted" and not link:
+                # Posted but no URL field — log keys so we can add the right field name
+                log.warning(f"  {platform} state=posted but no URL field found. Post keys: {sorted(post.keys())}")
             elif state in ("error", "failed"):
                 err = post.get("error") or "unknown error"
                 piece.publer_job_ids[f"{platform}_url"] = f"FAILED: {err}"
                 log.error(f"  ✗ {platform} failed: {err}")
                 pending.pop(platform)
+        first_poll = False
     if pending:
         log.warning(f"  posts still pending at deadline: {list(pending.keys())}")
         for platform, post_id in pending.items():
-            piece.publer_job_ids[f"{platform}_url"] = f"pending Publer post_id={post_id}"
+            piece.publer_job_ids[f"{platform}_url"] = f"PENDING: post_id={post_id}"
 
 
-def publish(piece: ContentPiece) -> None:
-    """Push piece to Publer for every target platform that has a configured account id."""
+def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
+    """
+    Push piece to Publer for every target platform that has a configured account id.
+
+    Default mode (`wait_for_live=False`): non-blocking — schedule all posts in
+    parallel, set status="scheduled", enqueue for the watcher
+    (scripts/publish_watcher.py) to confirm permalinks asynchronously, return.
+    Cuts ~5 min off every run because we no longer poll Publer for live URLs
+    inside this process.
+
+    Legacy mode (`wait_for_live=True`): keep the old behavior — schedule, then
+    poll up to 6 min for live permalinks, set status from actual outcomes.
+    Useful for manual debugging; default behavior is non-blocking.
+    """
     if not PUBLER_KEY:
         raise RuntimeError("PUBLER_API_KEY not set; cannot --publish")
 
@@ -494,52 +648,66 @@ def publish(piece: ContentPiece) -> None:
             if img.local_path:
                 media_ids.append(_publer_upload(img.local_path, "image/png"))
 
-    # 2) Schedule per platform
-    for platform in piece.target_platforms:
+    # 2) Schedule per platform — in parallel. Each platform is an independent
+    # Publer API call; sequential adds ~5-10s, parallel collapses to ~one round-trip.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _schedule_one(platform: str) -> tuple[str, str]:
+        """Returns (platform, job_id_or_FAILED_marker). Never raises."""
         account = PUBLER_ACCOUNTS.get(platform)
         if not account:
             log.warning(f"no PUBLER_{platform.upper()}_ID configured -- skipping {platform}")
-            continue
-
-        # Twitter thread: split the article body deterministically when it
-        # exceeds Twitter's per-tweet budget. No LLM call.
+            return platform, ""
         if platform == "twitter" and needs_thread(piece.body):
             tweets = split_thread(piece.body)
             try:
-                job_id = _publer_schedule_thread(account, tweets, media_ids)
-                piece.publer_job_ids[platform] = job_id
-                log.info(f"  -> twitter thread ({len(tweets)} tweets), job_id={job_id}")
+                jid = _publer_schedule_thread(account, tweets, media_ids)
+                log.info(f"  -> twitter thread ({len(tweets)} tweets), job_id={jid}")
+                return platform, jid
             except Exception as e:
                 log.error(f"  !! twitter thread failed: {e}")
-                piece.publer_job_ids[platform] = f"FAILED: {e}"
-            continue
-
+                return platform, f"FAILED: {e}"
         text = caption_for(piece, platform)
         if not text:
             log.warning(f"empty body for {platform} -- skipping")
-            continue
-        if piece.video:
-            ptype = "reel" if platform == "instagram" else "video"
-        else:
-            ptype = "photo"
+            return platform, ""
+        ptype = ("reel" if platform == "instagram" else "video") if piece.video else "photo"
         try:
-            job_id = _publer_schedule(platform, account, ptype, text, media_ids)
-            piece.publer_job_ids[platform] = job_id
-            log.info(f"  -> {platform} scheduled, job_id={job_id}")
+            jid = _publer_schedule(platform, account, ptype, text, media_ids)
+            log.info(f"  -> {platform} scheduled, job_id={jid}")
+            return platform, jid
         except Exception as e:
             log.error(f"  !! {platform} failed: {e}")
-            piece.publer_job_ids[platform] = f"FAILED: {e}"
+            return platform, f"FAILED: {e}"
+
+    with ThreadPoolExecutor(max_workers=max(1, len(piece.target_platforms))) as pool:
+        for fut in as_completed([pool.submit(_schedule_one, p) for p in piece.target_platforms]):
+            platform, jid = fut.result()
+            if jid:
+                piece.publer_job_ids[platform] = jid
 
     piece.posted_at = datetime.now(timezone.utc)
 
-    # Wait for each scheduled post to actually go live, then capture its permalink.
-    # 6-minute window covers our 2-min schedule offset + Publer lag + slow platforms.
-    _wait_for_posts_live(piece, max_wait_s=360, poll_interval_s=15)
-
-    # Status reflects ACTUAL outcome, not Publer's "we accepted your schedule request"
-    # response. A platform is confirmed only when _wait_for_posts_live captured a real
-    # post_link in publer_job_ids[f"{platform}_url"].
     attempted = [p for p in piece.target_platforms if p in piece.publer_job_ids]
+    if not attempted:
+        piece.status = "failed"
+        log.info(f"  publish outcome: status=failed (no platforms accepted)")
+        return
+
+    # Default: hand the run off to the watcher. We've already done the only
+    # latency-bound work (schedule API calls); polling for permalinks is what
+    # used to take 2-6 min and now happens out-of-process.
+    if not wait_for_live:
+        piece.status = "scheduled"
+        publish_enqueue(piece, max_wait_s=720)
+        log.info(
+            f"  publish outcome: status=scheduled, {len(attempted)} platforms enqueued for watcher "
+            f"(run scripts/publish_watcher.py to resolve permalinks)"
+        )
+        return
+
+    # Legacy / debugging path: keep the run alive until permalinks resolve.
+    _wait_for_posts_live(piece, max_wait_s=360, poll_interval_s=15)
     confirmed: list[str] = []
     failed: list[str] = []
     for platform in attempted:
@@ -551,10 +719,7 @@ def publish(piece: ContentPiece) -> None:
             confirmed.append(platform)
         else:
             failed.append(platform)
-
-    if not attempted:
-        piece.status = "failed"
-    elif confirmed and not failed:
+    if confirmed and not failed:
         piece.status = "posted"
     elif confirmed:
         piece.status = "partial"
@@ -579,6 +744,7 @@ def run(
     duration: int,
     do_publish: bool,
     audio_mode: AudioMode | None = None,
+    wait_for_live: bool = False,
 ) -> ContentPiece:
     log.info("=" * 60)
     log.info(f"  Zeus pipeline -- {content_type.value}: {topic}")
@@ -586,36 +752,102 @@ def run(
         log.info(f"  audio mode: {audio_mode.value}")
     log.info("=" * 60)
 
-    title, body = generate_article_text(topic, content_type)
-    piece = ContentPiece(content_type=content_type, title=title, body=body, topic=topic, audio_mode=audio_mode)
-    log.info(f"  text -> title='{title}' body={len(body)}c")
-
-    generate_media_for(piece, slides=slides, video_seconds=duration)
+    # Build a stub piece up front so we can time text-gen onto it.
+    piece = ContentPiece(content_type=content_type, title="", body="", topic=topic, audio_mode=audio_mode)
+    with _Phase(piece, "text_gen"):
+        title, body, text_cost, text_source = generate_article_text(topic, content_type)
+    piece.title = title
+    piece.body = body
+    piece.add_cost(ORCHESTRATOR_MODEL, text_cost, kind="text", source=text_source)
     log.info(
-        f"  media -> images={len(piece.images)} video={'yes' if piece.video else 'no'} cost=${piece.total_cost:.3f}"
+        f"  text -> title='{title}' body={len(body)}c run_id={piece.run_id} "
+        f"cost=${text_cost:.6f} ({text_source}) "
+        f"took={piece.phase_durations_ms.get('text_gen', 0)}ms"
     )
 
-    errors = piece.validate()
-    if errors:
-        log.warning(f"validation issues: {errors}")
+    # Stable artifact dir — set BEFORE any paid call so a crash leaves recoverable
+    # bytes on disk (NOT /tmp). orphan_sweep.py keys off this path.
+    artifact_dir = ARTIFACT_ROOT / f"{piece.run_id}_{_safe_topic(piece.topic)}"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    piece.local_artifact_dir = str(artifact_dir)
+    log.info(f"  artifacts -> {piece.local_artifact_dir}")
 
     archive = NotionArchive()
-    archive.archive(piece)
-    log.info(f"  archived -> {piece.notion_page_id}")
 
-    if do_publish:
-        publish(piece)
-        archive.update_status(piece)
-        log.info(f"  published -> jobs={piece.publer_job_ids}")
+    # Archive EARLY (text + run_id + artifact dir). If the pipeline later crashes
+    # mid-media, the Notion row already exists pointing at the artifact dir, and
+    # update_assets() below will patch in whatever bytes we did capture.
+    with _Phase(piece, "notion_archive_early"):
+        try:
+            archive.archive(piece)
+            log.info(f"  archived (pre-media) -> {piece.notion_page_id}")
+        except Exception as e:
+            log.error(f"  early Notion archive failed (proceeding so spend lands in ledger): {e}")
+
+    media_error: Exception | None = None
+    with _Phase(piece, "media_gen"):
+        try:
+            generate_media_for(piece, slides=slides, video_seconds=duration)
+            log.info(
+                f"  media -> images={len(piece.images)} video={'yes' if piece.video else 'no'} cost=${piece.total_cost:.3f} "
+                f"took={piece.phase_durations_ms.get('media_gen', 0)}ms"
+            )
+            errors = piece.validate()
+            if errors:
+                log.warning(f"validation issues: {errors}")
+        except Exception as e:
+            media_error = e
+            piece.status = "media_partial" if (piece.images or piece.video) else "failed"
+            log.error(f"  media generation crashed (status={piece.status}): {e}")
+
+    # Patch Notion with whatever assets we captured — success OR partial. If the
+    # early archive failed, retry it now so the row at least exists.
+    with _Phase(piece, "notion_assets"):
+        try:
+            if not piece.notion_page_id:
+                archive.archive(piece)
+                log.info(f"  archived (recovery) -> {piece.notion_page_id}")
+            archive.update_assets(piece)
+            log.info(f"  notion assets patched ({len(piece.images)} images, video={'yes' if piece.video else 'no'})")
+        except Exception as e:
+            log.error(f"  Notion update_assets failed: {e}")
+
+    publish_error: Exception | None = None
+    if do_publish and media_error is None:
+        with _Phase(piece, "publish"):
+            try:
+                publish(piece, wait_for_live=wait_for_live)
+                archive.update_status(piece)
+                log.info(f"  published -> jobs={piece.publer_job_ids} took={piece.phase_durations_ms.get('publish', 0)}ms")
+            except Exception as e:
+                publish_error = e
+                log.error(f"  publish failed: {e}")
+    elif do_publish:
+        log.warning("  skipping publish — media did not complete cleanly")
     else:
         log.info("  skip publish (use --publish to post)")
 
-    # Always-on cost ledger + email notification (every run, regardless of publish flag)
-    ledger_append(piece)
-    backend = send_pipeline_summary(piece)
-    log.info(f"  notified -> backend={backend}")
+    # Always finalize: ledger row + email, regardless of upstream failures. The
+    # ledger row supersedes any checkpoint rows for this run_id, and the email
+    # surfaces the leaked-spend warning if status is failed/media_partial.
+    try:
+        ledger_append(piece)
+    except Exception as e:
+        log.error(f"  ledger_append failed: {e}")
+    try:
+        backend = send_pipeline_summary(piece)
+        log.info(f"  notified -> backend={backend}")
+    except Exception as e:
+        log.error(f"  email failed: {e}")
 
-    log.info(f"DONE — total cost ${piece.total_cost:.4f}, models {piece.models_used}")
+    log.info(
+        f"DONE — total cost ${piece.total_cost:.4f}, models {piece.models_used}, status={piece.status}"
+    )
+
+    if media_error is not None:
+        raise media_error
+    if publish_error is not None:
+        raise publish_error
     return piece
 
 
@@ -632,6 +864,11 @@ def main() -> int:
         help="Audio mode for videos: music_only, music_narration, narration_primary",
     )
     p.add_argument("--publish", action="store_true", help="Also post to Publer (default: archive only)")
+    p.add_argument(
+        "--wait-for-live", action="store_true",
+        help="Block until Publer confirms permalinks (~6 min). Default is non-blocking — "
+             "scripts/publish_watcher.py resolves them out-of-process.",
+    )
     args = p.parse_args()
 
     required = ["OPENROUTER_API_KEY", "FAL_KEY", "NOTION_API_KEY"]
@@ -655,6 +892,7 @@ def main() -> int:
             duration=args.duration,
             do_publish=args.publish,
             audio_mode=audio_mode,
+            wait_for_live=args.wait_for_live,
         )
         return 0
     except Exception as e:  # surface clean failure rather than dumping a traceback into the user's terminal

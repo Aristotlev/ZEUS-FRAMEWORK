@@ -92,17 +92,28 @@ def _subject(p: ContentPiece) -> str:
 
 
 def _post_links_table(p: ContentPiece) -> list[tuple[str, str]]:
-    """Return [(platform, link_or_status), ...] for the email."""
+    """Return [(platform, link_or_status), ...] for the email.
+
+    Only real public URLs (https://...) are surfaced as links. Anything else
+    (FAILED/PENDING/missing) is shown as an honest status — never a Publer
+    job_id, which is useless to anyone who isn't logged into Publer.
+    """
     rows: list[tuple[str, str]] = []
     for platform in p.target_platforms:
-        job_id = p.publer_job_ids.get(platform, "")
-        if not job_id:
+        scheduled = p.publer_job_ids.get(platform, "")
+        url = p.publer_job_ids.get(f"{platform}_url", "")
+        if not scheduled:
             rows.append((platform, "not posted"))
-        elif job_id.startswith("FAILED"):
-            rows.append((platform, job_id))
+        elif scheduled.startswith("FAILED"):
+            rows.append((platform, scheduled))
+        elif url and url.startswith("http"):
+            rows.append((platform, url))
+        elif url and url.startswith("FAILED"):
+            rows.append((platform, url))
+        elif url and url.startswith("PENDING"):
+            rows.append((platform, "⚠️ posted but live-URL not resolved in 12m — check Publer dashboard"))
         else:
-            link = p.publer_job_ids.get(f"{platform}_url") or f"job={job_id}"
-            rows.append((platform, link))
+            rows.append((platform, "⚠️ scheduled but live-URL not yet captured — check Publer dashboard"))
     return rows
 
 
@@ -113,16 +124,39 @@ def _ledger_block_text() -> str:
     all_time = ledger_summary(window_days=None)
     lines = [
         "Cost Ledger:",
-        f"  Last 24h:  ${today['total_cost_usd']:.4f}  ({today['runs']} runs)",
-        f"  Last 7d:   ${week['total_cost_usd']:.4f}  ({week['runs']} runs)",
-        f"  Last 30d:  ${month['total_cost_usd']:.4f}  ({month['runs']} runs)",
-        f"  All time:  ${all_time['total_cost_usd']:.4f}  ({all_time['runs']} runs)",
+        f"  Last 24h:  ${today['total_cost_usd']:.4f}  ({today['runs']} runs"
+        + (f", {today['leaked_runs']} leaked ${today['leaked_cost_usd']:.4f}" if today.get('leaked_runs') else "")
+        + ")",
+        f"  Last 7d:   ${week['total_cost_usd']:.4f}  ({week['runs']} runs"
+        + (f", {week['leaked_runs']} leaked ${week['leaked_cost_usd']:.4f}" if week.get('leaked_runs') else "")
+        + ")",
+        f"  Last 30d:  ${month['total_cost_usd']:.4f}  ({month['runs']} runs"
+        + (f", {month['leaked_runs']} leaked ${month['leaked_cost_usd']:.4f}" if month.get('leaked_runs') else "")
+        + ")",
+        f"  All time:  ${all_time['total_cost_usd']:.4f}  ({all_time['runs']} runs"
+        + (f", {all_time['leaked_runs']} leaked ${all_time['leaked_cost_usd']:.4f}" if all_time.get('leaked_runs') else "")
+        + ")",
     ]
     by_model = month.get("by_model") or {}
     if by_model:
         lines.append("  Last-30d top models:")
         for m, v in list(by_model.items())[:5]:
             lines.append(f"    {m}: ${v:.4f}")
+    if all_time.get("leaked_runs"):
+        lines.append("")
+        lines.append(
+            f"  ⚠ ${all_time['leaked_cost_usd']:.4f} of all-time spend is in 'leaked' runs "
+            f"(crashed mid-pipeline). Run scripts/orphan_sweep.py to recover."
+        )
+    accuracy = month.get("accuracy_pct", 100.0)
+    actual = month.get("actual_cost_usd", 0)
+    est = month.get("estimated_cost_usd", 0)
+    lines.append("")
+    lines.append(
+        f"  Accuracy (last 30d): {accuracy}%  (actual ${actual:.4f}, est ${est:.4f})"
+    )
+    if est > 0:
+        lines.append("    Run scripts/fal_reconcile.py to close the actual/estimate gap.")
     return "\n".join(lines)
 
 
@@ -138,17 +172,47 @@ def _ledger_block_html() -> str:
         ("All time", all_time),
     ]
     body = "".join(
-        f"<tr><td>{label}</td><td style='text-align:right'>${s['total_cost_usd']:.4f}</td><td style='text-align:right'>{s['runs']}</td></tr>"
+        f"<tr><td>{label}</td>"
+        f"<td style='text-align:right'>${s['total_cost_usd']:.4f}</td>"
+        f"<td style='text-align:right'>{s['runs']}</td>"
+        f"<td style='text-align:right;color:{'#b91c1c' if s.get('leaked_runs') else '#888'}'>"
+        f"{s.get('leaked_runs', 0)} (${s.get('leaked_cost_usd', 0):.4f})"
+        f"</td></tr>"
         for label, s in rows
     )
     by_model = month.get("by_model") or {}
     model_rows = "".join(f"<tr><td>{m}</td><td style='text-align:right'>${v:.4f}</td></tr>" for m, v in list(by_model.items())[:5])
+    leaked_warning = ""
+    if all_time.get("leaked_runs"):
+        leaked_warning = (
+            f"<p style='color:#b91c1c'><b>⚠ ${all_time['leaked_cost_usd']:.4f}</b> of all-time spend "
+            f"is in <b>{all_time['leaked_runs']} leaked runs</b> (crashed mid-pipeline). "
+            f"Run <code>scripts/orphan_sweep.py</code> to recover bytes from disk and re-archive.</p>"
+        )
+    accuracy = month.get("accuracy_pct", 100.0)
+    actual = month.get("actual_cost_usd", 0)
+    est = month.get("estimated_cost_usd", 0)
+    accuracy_color = "#15803d" if accuracy >= 95 else ("#a16207" if accuracy >= 75 else "#b91c1c")
+    accuracy_block = (
+        f"<p>Cost accuracy (last 30d): "
+        f"<b style='color:{accuracy_color}'>{accuracy}%</b> "
+        f"&nbsp;|&nbsp; actual <b>${actual:.4f}</b> "
+        f"&nbsp;|&nbsp; estimated <b>${est:.4f}</b>"
+        + (
+            " &nbsp;<i>(run <code>scripts/fal_reconcile.py</code> to close the gap)</i>"
+            if est > 0
+            else ""
+        )
+        + "</p>"
+    )
     return (
         "<h3>Cost Ledger (always-on)</h3>"
         "<table style='border-collapse:collapse' cellpadding='4'>"
-        "<tr><th align='left'>Window</th><th align='right'>Cost</th><th align='right'>Runs</th></tr>"
+        "<tr><th align='left'>Window</th><th align='right'>Cost</th><th align='right'>Runs</th><th align='right'>Leaked</th></tr>"
         f"{body}"
         "</table>"
+        + accuracy_block
+        + leaked_warning
         + (
             "<h4>Last-30d top models</h4>"
             "<table style='border-collapse:collapse' cellpadding='4'>"
@@ -167,16 +231,36 @@ def _text_body(p: ContentPiece) -> str:
         f"Type:  {p.content_type.value}",
         f"Topic: {p.topic}",
         f"Status: {p.status}",
-        "",
-        "Posts:",
+        f"Run ID: {p.run_id}",
     ]
+    if p.status in ("failed", "media_partial", "partial"):
+        parts.append(
+            f"⚠ This run did NOT complete cleanly. ${p.total_cost:.4f} was spent. "
+            f"Captured: {len(p.images)} images, video={'yes' if p.video else 'no'}. "
+            f"Bytes are at the artifact dir below — recover before it gets cleaned up."
+        )
+    parts.append("")
+    parts.append("Posts:")
     for platform, link in _post_links_table(p):
         parts.append(f"  - {platform:10s} {link}")
     parts.append("")
     parts.append("This run cost breakdown:")
     for k, v in p.cost_breakdown.items():
-        parts.append(f"  {k}: ${v:.4f}")
-    parts.append(f"This run total: ${p.total_cost:.4f}")
+        src = (p.cost_sources.get(k) if hasattr(p, "cost_sources") else None) or "estimate"
+        flag = "" if src == "actual" else "  (~est)"
+        parts.append(f"  {k}: ${v:.4f}{flag}")
+    parts.append(
+        f"This run total: ${p.total_cost:.4f}  (actual ${p.actual_cost:.4f}, est ${p.estimated_cost:.4f})"
+    )
+    parts.append("")
+    if p.local_artifact_dir:
+        parts.append(f"Local artifacts: {p.local_artifact_dir}")
+    if p.images:
+        parts.append("Image URLs (fal — may expire):")
+        for a in p.images:
+            parts.append(f"  - {a.url}")
+    if p.video and p.video.url:
+        parts.append(f"Video URL (fal — may expire): {p.video.url}")
     parts.append("")
     parts.append(_ledger_block_text())
     if p.notion_page_id:
@@ -190,24 +274,64 @@ def _html_body(p: ContentPiece) -> str:
         f"<tr><td><b>{platform}</b></td><td>{link}</td></tr>"
         for platform, link in _post_links_table(p)
     )
-    cost_html = "".join(
-        f"<tr><td>{k}</td><td style='text-align:right'>${v:.4f}</td></tr>"
-        for k, v in p.cost_breakdown.items()
-    )
+    cost_rows = []
+    for k, v in p.cost_breakdown.items():
+        src = (p.cost_sources.get(k) if hasattr(p, "cost_sources") else None) or "estimate"
+        tag = (
+            "<span style='color:#15803d'>✓ actual</span>"
+            if src == "actual"
+            else "<span style='color:#a16207'>~ estimate</span>"
+        )
+        cost_rows.append(
+            f"<tr><td>{k}</td><td style='text-align:right'>${v:.4f}</td><td style='font-size:11px'>{tag}</td></tr>"
+        )
+    cost_html = "".join(cost_rows)
     notion_html = (
         f"<p>Notion archive: <code>{p.notion_page_id}</code></p>" if p.notion_page_id else ""
     )
+    artifact_html = (
+        f"<p><b>Local artifacts:</b> <code>{p.local_artifact_dir}</code></p>"
+        if p.local_artifact_dir
+        else ""
+    )
+    fail_banner = ""
+    if p.status in ("failed", "media_partial", "partial"):
+        fail_banner = (
+            f"<p style='background:#fee;border:1px solid #b91c1c;padding:8px;border-radius:4px;color:#b91c1c'>"
+            f"<b>⚠ Run did NOT complete cleanly.</b> ${p.total_cost:.4f} spent. "
+            f"Captured {len(p.images)} images, video={'yes' if p.video else 'no'}. "
+            f"Bytes are at the artifact dir below — recover before it gets cleaned up."
+            f"</p>"
+        )
+    asset_urls_html = ""
+    if p.images or (p.video and p.video.url):
+        rows = "".join(
+            f"<tr><td>image {i + 1}</td><td><a href='{a.url}'>{a.url[:80]}…</a></td></tr>"
+            for i, a in enumerate(p.images)
+        )
+        if p.video and p.video.url:
+            rows += f"<tr><td>video</td><td><a href='{p.video.url}'>{p.video.url[:80]}…</a></td></tr>"
+        asset_urls_html = (
+            "<h4>Asset URLs (fal — may expire)</h4>"
+            f"<table style='border-collapse:collapse' cellpadding='4'>{rows}</table>"
+        )
     return f"""<html><body style="font-family: -apple-system, sans-serif; color:#111">
 <h2>{_TYPE_ICON.get(p.content_type, '')} {p.title}</h2>
-<p><b>Type:</b> {p.content_type.value} &middot; <b>Topic:</b> {p.topic} &middot; <b>Status:</b> {p.status}</p>
+<p><b>Type:</b> {p.content_type.value} &middot; <b>Topic:</b> {p.topic} &middot; <b>Status:</b> {p.status} &middot; <b>Run ID:</b> <code>{p.run_id}</code></p>
+
+{fail_banner}
 
 <h3>Posts</h3>
 <table style="border-collapse:collapse" cellpadding="4">{posts_html}</table>
 
 <h3>This run</h3>
 <table style="border-collapse:collapse" cellpadding="4">{cost_html}
-<tr><td><b>Total</b></td><td style='text-align:right'><b>${p.total_cost:.4f}</b></td></tr>
+<tr><td><b>Total</b></td><td style='text-align:right'><b>${p.total_cost:.4f}</b></td>
+<td style='font-size:11px'>actual ${p.actual_cost:.4f} · est ${p.estimated_cost:.4f}</td></tr>
 </table>
+
+{artifact_html}
+{asset_urls_html}
 
 {_ledger_block_html()}
 
