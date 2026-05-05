@@ -73,10 +73,14 @@ PUBLER_ACCOUNTS = {
 
 
 def _publer_headers() -> dict:
+    # User-Agent + Origin are required — Publer sits behind Cloudflare and
+    # returns 1010 "browser_signature_banned" without them.
     return {
         "Authorization": f"Bearer-API {PUBLER_KEY}",
         "Publer-Workspace-Id": PUBLER_WORKSPACE,
         "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; ZeusPipeline/1.0)",
+        "Origin": "https://app.publer.com",
     }
 
 
@@ -87,6 +91,30 @@ def _norm(s: str) -> str:
 def _caption_for(piece: ContentPiece, platform: str) -> str:
     limit = LIMITS.get(platform, len(piece.body))
     return piece.body[:limit]
+
+
+def _post_id_from_job(job_id: str) -> str | None:
+    """Resolve a Publer schedule job_id directly to the post id.
+
+    Eliminates the fuzzy snippet match for correct cases — concurrent runs on
+    the same topic used to alias their permalinks because the snippet matcher
+    would lock onto whichever post landed in the timeline first.
+    """
+    if not job_id or job_id.startswith("FAILED"):
+        return None
+    try:
+        r = requests.get(f"{PUBLER_BASE}/job_status/{job_id}", headers=_publer_headers(), timeout=15)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        posts = data.get("posts") or (data.get("payload") or {}).get("posts") or []
+        for p in posts:
+            pid = p.get("id") or p.get("post_id")
+            if pid:
+                return pid
+    except Exception as e:
+        log.warning(f"_post_id_from_job error: {e}")
+    return None
 
 
 def _find_publer_post_id(account_id: str, snippet: str) -> str | None:
@@ -162,11 +190,16 @@ def _resolve_one(piece: ContentPiece, post_id_cache: dict) -> dict:
         cache_key = f"{piece.run_id}:{platform}"
         post_id = post_id_cache.get(cache_key)
         if not post_id:
-            if platform == "twitter" and needs_thread(piece.body):
-                snippet = split_thread(piece.body)[0]
-            else:
-                snippet = _caption_for(piece, platform) or piece.body
-            post_id = _find_publer_post_id(account, snippet)
+            # Prefer direct job_id -> post_id resolution. The snippet matcher
+            # only runs as a backstop for the (rare) race where job_status
+            # doesn't yet reflect the post.
+            post_id = _post_id_from_job(scheduled)
+            if not post_id:
+                if platform == "twitter" and needs_thread(piece.body):
+                    snippet = split_thread(piece.body)[0]
+                else:
+                    snippet = _caption_for(piece, platform) or piece.body
+                post_id = _find_publer_post_id(account, snippet)
             if post_id:
                 post_id_cache[cache_key] = post_id
         if not post_id:

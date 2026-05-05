@@ -27,6 +27,7 @@ Required env:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -82,10 +83,13 @@ PUBLER_ACCOUNTS = {
     "facebook": os.getenv("PUBLER_FACEBOOK_ID", ""),
 }
 
-# Image dimensions per content type
+# Image dimensions per content type. Carousel uses 2:3 portrait — IG, LinkedIn,
+# and TikTok all give portrait carousels noticeably more feed real estate than
+# 1:1 squares. Twitter renders portrait fine. Article stays square (single
+# image, in-feed scroll-stopper). Override per-run via --quality.
 IMAGE_SPECS = {
     ContentType.ARTICLE: (1024, 1024, "medium"),
-    ContentType.CAROUSEL: (1024, 1024, "medium"),
+    ContentType.CAROUSEL: (1024, 1536, "medium"),
     # videos don't use images directly, but a thumbnail is generated for the Notion record
 }
 
@@ -195,7 +199,8 @@ def generate_article_text(topic: str, content_type: ContentType) -> tuple[str, s
     target_chars = {
         ContentType.ARTICLE: "250-450",
         ContentType.LONG_ARTICLE: "550-900",
-        ContentType.CAROUSEL: "550-900",
+        # Carousel body MUST be <450 chars total — visuals do the heavy lifting.
+        ContentType.CAROUSEL: "300-440",
         ContentType.SHORT_VIDEO: "300-500",
         ContentType.LONG_VIDEO: "700-1200",
     }[content_type]
@@ -277,13 +282,23 @@ def _local_dir(piece: ContentPiece) -> pathlib.Path:
     return out
 
 
-def generate_media_for(piece: ContentPiece, slides: int = 4, video_seconds: int = 5) -> None:
-    """Dispatch media generation by content type. Mutates `piece` in place."""
+def generate_media_for(
+    piece: ContentPiece,
+    slides: int = 4,
+    video_seconds: int = 5,
+    quality_override: Optional[str] = None,
+) -> None:
+    """Dispatch media generation by content type. Mutates `piece` in place.
+
+    quality_override: if set ('low'|'medium'|'high'), replaces the per-type
+    default quality from IMAGE_SPECS. 'low' is great for carousel iteration
+    (~$0.005/slide vs $0.04), 'high' for marketing-grade ship quality (~$0.16).
+    """
     out_dir = _local_dir(piece)
     if piece.content_type in (ContentType.ARTICLE, ContentType.LONG_ARTICLE):
-        _gen_article_image(piece, out_dir)
+        _gen_article_image(piece, out_dir, quality_override=quality_override)
     elif piece.content_type == ContentType.CAROUSEL:
-        _gen_carousel_images(piece, out_dir, slides)
+        _gen_carousel_images(piece, out_dir, slides, quality_override=quality_override)
     elif piece.content_type == ContentType.SHORT_VIDEO:
         _gen_video(piece, out_dir, aspect="9:16", duration=min(video_seconds, 10))
     elif piece.content_type == ContentType.LONG_VIDEO:
@@ -291,8 +306,10 @@ def generate_media_for(piece: ContentPiece, slides: int = 4, video_seconds: int 
     piece.status = "media_generated"
 
 
-def _gen_article_image(piece: ContentPiece, out_dir: pathlib.Path) -> None:
+def _gen_article_image(piece: ContentPiece, out_dir: pathlib.Path, quality_override: Optional[str] = None) -> None:
     w, h, q = IMAGE_SPECS[ContentType.ARTICLE]
+    if quality_override:
+        q = quality_override
     prompt = piece.body[:1000]
     url, cost = generate_image(prompt, width=w, height=h, quality=q, run_id=piece.run_id)
     local = download(url, str(out_dir / "image_1.png"))
@@ -305,7 +322,9 @@ def _gen_article_image(piece: ContentPiece, out_dir: pathlib.Path) -> None:
     ledger_checkpoint(piece, "article_image_generated")
 
 
-def _gen_carousel_images(piece: ContentPiece, out_dir: pathlib.Path, slides: int) -> None:
+def _gen_carousel_images(
+    piece: ContentPiece, out_dir: pathlib.Path, slides: int, quality_override: Optional[str] = None,
+) -> None:
     """
     Generate the N carousel slides in parallel. fal's queue handles concurrent
     jobs fine — sequentially this loop was the dominant carousel-pipeline cost
@@ -313,21 +332,41 @@ def _gen_carousel_images(piece: ContentPiece, out_dir: pathlib.Path, slides: int
     slide). On exception in one slide, surviving slides still land on `piece`
     and a checkpoint row is written before re-raising — so artifact-first
     recovery still works.
+
+    NOTE: gpt-image-2 occasionally renders text overlays despite the
+    "no text overlays, no captions" instruction in the slide prompt. The model
+    has no negative-prompt or "text=false" knob today; we accept this as a
+    known limitation and rely on prompt phrasing.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     slides = max(3, min(5, slides))
     slide_prompts = _carousel_slide_prompts(piece, slides)
     w, h, q = IMAGE_SPECS[ContentType.CAROUSEL]
+    if quality_override:
+        q = quality_override
 
     def _gen_one(idx: int, prompt: str) -> tuple[int, GeneratedAsset, float]:
-        url, cost = generate_image(prompt, width=w, height=h, quality=q, run_id=piece.run_id)
-        local = download(url, str(out_dir / f"slide_{idx + 1}.png"))
-        asset = GeneratedAsset(
-            url=url, kind="image", width=w, height=h,
-            model="gpt-image-2", cost_usd=cost, local_path=local,
-        )
-        return idx, asset, cost
+        # One slide failure used to abort the whole carousel and skip publish.
+        # Retry transient fal errors (timeouts, 5xx, post-lock flakes) up to 3
+        # times with exponential backoff before giving up on this slide.
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                url, cost = generate_image(prompt, width=w, height=h, quality=q, run_id=piece.run_id)
+                local = download(url, str(out_dir / f"slide_{idx + 1}.png"))
+                asset = GeneratedAsset(
+                    url=url, kind="image", width=w, height=h,
+                    model="gpt-image-2", cost_usd=cost, local_path=local,
+                )
+                return idx, asset, cost
+            except Exception as e:
+                last_err = e
+                wait = 2 ** attempt
+                log.warning(f"  slide {idx + 1} attempt {attempt + 1}/3 failed: {e}; retry in {wait}s")
+                time.sleep(wait)
+        assert last_err is not None
+        raise last_err
 
     # Slot the slides into a fixed-size list so insertion order matches slide
     # order regardless of completion order. Critical: slide 1 should be the
@@ -354,13 +393,45 @@ def _gen_carousel_images(piece: ContentPiece, out_dir: pathlib.Path, slides: int
         if asset is not None:
             piece.images.append(asset)
 
+    # Cheap byte-level dedupe — fal occasionally serves the same cached image
+    # for similar prompts, which would ship a carousel with 2 identical slides.
+    # MD5 catches exact byte matches; perceptual dedupe would need a new dep
+    # (imagehash + PIL) for marginal benefit. Soft warning, no abort — the
+    # ledger row + Notion update still get the truth.
+    seen_hashes: dict[str, int] = {}
+    for i, asset in enumerate(piece.images):
+        if not asset.local_path:
+            continue
+        try:
+            with open(asset.local_path, "rb") as fh:
+                h = hashlib.md5(fh.read()).hexdigest()
+        except OSError:
+            continue
+        if h in seen_hashes:
+            log.warning(
+                f"  carousel slide {i + 1} is byte-identical to slide "
+                f"{seen_hashes[h] + 1} — fal cache hit, visual is duplicated"
+            )
+        else:
+            seen_hashes[h] = i
+
     if first_error is not None:
         raise first_error
+
+
+_SLIDE_FALLBACK_LABELS = [
+    "hook visual: bold, eye-catching opener that telegraphs the topic",
+    "key data point: chart, table, or stat-heavy composition",
+    "secondary insight: contextual scene reinforcing the article's claim",
+    "supporting evidence: alternative visual angle or comparison",
+    "closing CTA-style visual: simple, conclusive frame",
+]
 
 
 def _carousel_slide_prompts(piece: ContentPiece, slides: int) -> list[str]:
     prompt = (
         f"You are designing a {slides}-slide social carousel based on this article. "
+        f"{_niche_clause()}"
         f"Output ONLY a JSON object {{\"slides\": [\"prompt1\", \"prompt2\", ...]}} with "
         f"exactly {slides} image-generation prompts. Each prompt is a vivid visual description "
         f"(no text overlays, no captions) of one slide. Slide 1 is a strong hook visual; the rest "
@@ -376,8 +447,16 @@ def _carousel_slide_prompts(piece: ContentPiece, slides: int) -> list[str]:
             return out[:slides]
     except json.JSONDecodeError:
         pass
-    log.warning("slide prompt JSON parse failed; falling back to article-body prompts")
-    return [piece.body[:800] for _ in range(slides)]
+    # JSON parse failed — vary fallback prompts deterministically so we never
+    # ship a carousel of N identical slides. Each gets a distinct visual brief
+    # plus the article body for context.
+    log.warning("slide prompt JSON parse failed; using varied fallback prompts")
+    body_excerpt = piece.body[:600]
+    return [
+        f"{_SLIDE_FALLBACK_LABELS[i % len(_SLIDE_FALLBACK_LABELS)]}. "
+        f"Article context: {body_excerpt}"
+        for i in range(slides)
+    ]
 
 
 def _gen_video(piece: ContentPiece, out_dir: pathlib.Path, aspect: str, duration: int) -> None:
@@ -416,10 +495,15 @@ def _gen_video(piece: ContentPiece, out_dir: pathlib.Path, aspect: str, duration
 # Publer (optional --publish)
 # ---------------------------------------------------------------------------
 def _publer_headers(json_body: bool = True) -> dict:
+    # User-Agent + Origin are required — Publer sits behind Cloudflare and
+    # returns 1010 "browser_signature_banned" without them
+    # (references/publer-api-reference.md).
     h = {
         "Authorization": PUBLER_AUTH,
         "Publer-Workspace-Id": PUBLER_WORKSPACE,
         "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; ZeusPipeline/1.0)",
+        "Origin": "https://app.publer.com",
     }
     if json_body:
         h["Content-Type"] = "application/json"
@@ -470,22 +554,36 @@ def _publer_schedule(provider: str, account_id: str, post_type: str, text: str, 
 def _publer_schedule_thread(
     account_id: str, tweets: list[str], media_ids: list[str],
 ) -> str:
-    """Post a Twitter thread via Publer. Media attaches to the first tweet only."""
+    """Post a Twitter thread via Publer.
+
+    Carousel + thread (>1 media): distribute media 1:1 across tweets so each
+    tweet has its own visual — Twitter caps a single tweet at 4 media, and
+    stacking 4 carousel slides on tweet 1 wastes the rest of the thread.
+    Single-image: attach to tweet 1 only (no benefit from distributing).
+    """
     # Publer interprets timezone-less ISO timestamps as UTC. Use UTC explicitly.
     when = (datetime.now(timezone.utc) + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
     thread_posts = []
+    distribute = len(media_ids) > 1
     for i, tweet_text in enumerate(tweets):
+        if distribute and i < len(media_ids):
+            tweet_media = [{"id": media_ids[i]}]
+        elif not distribute and i == 0 and media_ids:
+            tweet_media = [{"id": media_ids[0]}]
+        else:
+            tweet_media = []
+        ttype = "photo" if tweet_media else "status"
         post: dict = {
             "networks": {
                 "twitter": {
-                    "type": "photo" if (i == 0 and media_ids) else "status",
+                    "type": ttype,
                     "text": tweet_text,
                 }
             },
             "accounts": [{"id": account_id, "scheduled_at": when}],
         }
-        if i == 0 and media_ids:
-            post["networks"]["twitter"]["media"] = [{"id": mid} for mid in media_ids]
+        if tweet_media:
+            post["networks"]["twitter"]["media"] = tweet_media
         thread_posts.append(post)
     payload = {
         "bulk": {
@@ -500,6 +598,31 @@ def _publer_schedule_thread(
     if r.status_code != 200:
         raise RuntimeError(f"Publer thread schedule failed {r.status_code}: {r.text[:300]}")
     return r.json()["job_id"]
+
+
+def _publer_post_id_from_job(job_id: str) -> str | None:
+    """Resolve a Publer schedule job_id to the actual post id.
+
+    Far more reliable than the snippet-match fallback in `_publer_find_post_id`
+    — same topic posted twice + concurrent runs make snippet matching collide.
+    Publer's job_status response wraps the post objects under either `posts` or
+    `payload.posts` depending on plan; both are checked.
+    """
+    if not job_id or job_id.startswith("FAILED"):
+        return None
+    try:
+        r = requests.get(f"{PUBLER_BASE}/job_status/{job_id}", headers=_publer_headers(), timeout=15)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        posts = data.get("posts") or (data.get("payload") or {}).get("posts") or []
+        for p in posts:
+            pid = p.get("id") or p.get("post_id")
+            if pid:
+                return pid
+    except Exception as e:
+        log.warning(f"_publer_post_id_from_job error: {e}")
+    return None
 
 
 def _publer_find_post_id(account_id: str, text_snippet: str) -> str | None:
@@ -569,21 +692,26 @@ def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 720, poll_int
     for platform in piece.target_platforms:
         if platform not in piece.publer_job_ids:
             continue
-        if str(piece.publer_job_ids[platform]).startswith("FAILED"):
+        job_id = str(piece.publer_job_ids[platform])
+        if job_id.startswith("FAILED"):
             continue
         account = PUBLER_ACCOUNTS.get(platform)
         if not account:
             continue
-        if platform == "twitter" and needs_thread(piece.body):
-            snippet = split_thread(piece.body)[0]
-        else:
-            snippet = caption_for(piece, platform) or piece.body
-        post_id = _publer_find_post_id(account, snippet)
+        # Prefer direct job_id -> post_id resolution; falls back to snippet
+        # match if Publer's job_status doesn't yet have the post (can race).
+        post_id = _publer_post_id_from_job(job_id)
+        if not post_id:
+            if platform == "twitter" and needs_thread(piece.body):
+                snippet = split_thread(piece.body)[0]
+            else:
+                snippet = caption_for(piece, platform) or piece.body
+            post_id = _publer_find_post_id(account, snippet)
         if post_id:
             pending[platform] = post_id
             log.info(f"  tracking {platform} -> publer_post_id={post_id}")
         else:
-            log.warning(f"  could not resolve Publer post_id for {platform} (snippet match failed)")
+            log.warning(f"  could not resolve Publer post_id for {platform}")
 
     if not pending:
         log.warning("no Publer post IDs resolved; skipping live-wait")
@@ -639,14 +767,21 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
     if not PUBLER_KEY:
         raise RuntimeError("PUBLER_API_KEY not set; cannot --publish")
 
-    # 1) Upload media once
+    # 1) Upload media once. Carousels = N parallel image uploads (1-3s each
+    # sequential = 4-12s of dead time on a 4-slide run). ThreadPoolExecutor.map
+    # preserves input order so slide ordering is not disturbed.
+    from concurrent.futures import ThreadPoolExecutor
+
     media_ids: list[str] = []
     if piece.video and piece.video.local_path:
         media_ids = [_publer_upload(piece.video.local_path, "video/mp4")]
     else:
-        for img in piece.images:
-            if img.local_path:
-                media_ids.append(_publer_upload(img.local_path, "image/png"))
+        images_with_path = [img for img in piece.images if img.local_path]
+        if images_with_path:
+            with ThreadPoolExecutor(max_workers=min(8, len(images_with_path))) as pool:
+                media_ids = list(
+                    pool.map(lambda img: _publer_upload(img.local_path, "image/png"), images_with_path)
+                )
 
     # 2) Schedule per platform — in parallel. Each platform is an independent
     # Publer API call; sequential adds ~5-10s, parallel collapses to ~one round-trip.
@@ -658,11 +793,18 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
         if not account:
             log.warning(f"no PUBLER_{platform.upper()}_ID configured -- skipping {platform}")
             return platform, ""
+        # Twitter caps a single tweet at 4 media. For carousels with >4 slides
+        # take the first 4 — the rest would be silently dropped by Twitter.
+        if platform == "twitter" and len(media_ids) > 4:
+            platform_media = media_ids[:4]
+            log.info(f"  twitter: trimming {len(media_ids)} slides to 4 (Twitter cap)")
+        else:
+            platform_media = media_ids
         if platform == "twitter" and needs_thread(piece.body):
             tweets = split_thread(piece.body)
             try:
-                jid = _publer_schedule_thread(account, tweets, media_ids)
-                log.info(f"  -> twitter thread ({len(tweets)} tweets), job_id={jid}")
+                jid = _publer_schedule_thread(account, tweets, platform_media)
+                log.info(f"  -> twitter thread ({len(tweets)} tweets, {len(platform_media)} media), job_id={jid}")
                 return platform, jid
             except Exception as e:
                 log.error(f"  !! twitter thread failed: {e}")
@@ -673,8 +815,8 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
             return platform, ""
         ptype = ("reel" if platform == "instagram" else "video") if piece.video else "photo"
         try:
-            jid = _publer_schedule(platform, account, ptype, text, media_ids)
-            log.info(f"  -> {platform} scheduled, job_id={jid}")
+            jid = _publer_schedule(platform, account, ptype, text, platform_media)
+            log.info(f"  -> {platform} scheduled ({len(platform_media)} media), job_id={jid}")
             return platform, jid
         except Exception as e:
             log.error(f"  !! {platform} failed: {e}")
@@ -745,6 +887,7 @@ def run(
     do_publish: bool,
     audio_mode: AudioMode | None = None,
     wait_for_live: bool = False,
+    quality: Optional[str] = None,
 ) -> ContentPiece:
     log.info("=" * 60)
     log.info(f"  Zeus pipeline -- {content_type.value}: {topic}")
@@ -787,13 +930,20 @@ def run(
     media_error: Exception | None = None
     with _Phase(piece, "media_gen"):
         try:
-            generate_media_for(piece, slides=slides, video_seconds=duration)
+            generate_media_for(piece, slides=slides, video_seconds=duration, quality_override=quality)
             log.info(
                 f"  media -> images={len(piece.images)} video={'yes' if piece.video else 'no'} cost=${piece.total_cost:.3f} "
                 f"took={piece.phase_durations_ms.get('media_gen', 0)}ms"
             )
             errors = piece.validate()
             if errors:
+                # Carousels with the wrong slide count post as broken UX (single
+                # image / album-of-2). Hard-fail so publish is skipped — the run
+                # still archives, ledgers, and emails via the partial-recovery
+                # path so spend isn't lost.
+                if piece.content_type == ContentType.CAROUSEL:
+                    log.error(f"  carousel validation failed: {errors}")
+                    raise RuntimeError(f"carousel validation: {errors}")
                 log.warning(f"validation issues: {errors}")
         except Exception as e:
             media_error = e
@@ -858,6 +1008,13 @@ def main() -> int:
     p.add_argument("--slides", type=int, default=4, help="Slides for carousels (3-5)")
     p.add_argument("--duration", type=int, default=5, help="Seconds for video (5-10 per call)")
     p.add_argument(
+        "--quality",
+        choices=["low", "medium", "high"],
+        default=None,
+        help="GPT Image 2 quality. Defaults from IMAGE_SPECS per type. "
+             "low ~$0.005/img (carousel iteration), medium ~$0.04, high ~$0.16 (ship-grade).",
+    )
+    p.add_argument(
         "--audio-mode",
         choices=[m.value for m in AudioMode],
         default=None,
@@ -893,6 +1050,7 @@ def main() -> int:
             do_publish=args.publish,
             audio_mode=audio_mode,
             wait_for_live=args.wait_for_live,
+            quality=args.quality,
         )
         return 0
     except Exception as e:  # surface clean failure rather than dumping a traceback into the user's terminal

@@ -32,7 +32,7 @@ Platform Publishers (API Integration)
 | Type | Media | Platforms | Description Length | Implementation |
 |------|-------|-----------|--------------------|----------------|
 | `article` | 1 image (1024x1024 default) | Twitter, IG, LI, TT | 550-900 chars (clears "read more" everywhere) | `ContentType.ARTICLE` |
-| `carousel` | 3-5 slide images | Twitter, IG, LI, TT | 550-900 chars | `ContentType.CAROUSEL` |
+| `carousel` | 3-5 slide images | Twitter, IG, LI, TT | <450 chars (user mandate) | `ContentType.CAROUSEL` |
 | `short_video` | 1080x1920 video, <90s | Twitter, IG (reel), LI, TT, YouTube | 300-500 char script | `ContentType.SHORT_VIDEO` |
 | `long_video` | 1920x1080 video | YouTube, Twitter, LI, Reddit | 700-1200 char script | `ContentType.LONG_VIDEO` |
 
@@ -212,7 +212,7 @@ Content Output → WhatsApp Cloud API → WhatsApp
 
 - **Article**: 380-400 chars
 - **Long Article**: 1400-1500 chars
-- **Carousel**: 380-400 chars (3-5 images as swipe post, all share one caption)
+- **Carousel**: <450 chars (user-mandated cap — visuals do the heavy lifting), same body across every platform (3-5 portrait slides as swipe post)
 - **Short/Long Video**: body = narration script (300-500 / 700-1200 chars)
 - Truncate to stated limit if over. Never generate per-platform rewrites.
 - Same text to Twitter, Instagram, LinkedIn, TikTok, YouTube.
@@ -286,7 +286,7 @@ Content Output → WhatsApp Cloud API → WhatsApp
 
 - **Article**: 380-400 chars
 - **Long Article**: 1400-1500 chars
-- **Carousel**: 380-400 chars (3-5 images as swipe post, all share one caption)
+- **Carousel**: <450 chars (user-mandated cap — visuals do the heavy lifting), same body across every platform (3-5 portrait slides as swipe post)
 - **Short/Long Video**: body = narration script (300-500 / 700-1200 chars)
 - Truncate to stated limit if over. Never generate per-platform rewrites.
 - Same text to Twitter, Instagram, LinkedIn, TikTok, YouTube.

@@ -150,6 +150,8 @@ def generate_image(
     log.info(f"fal image: {width}x{height} {quality} -- {prompt[:60]}")
     # fal's OpenAI-namespaced models have intermittent "Exhausted balance" lock states
     # immediately after a previous job finishes billing. Retry with backoff.
+    # Also retry transient 429 (rate limit) and 5xx — the upstream queue is
+    # eventually consistent under bursts.
     r = None
     for attempt in range(6):
         r = _req.post("https://queue.fal.run/openai/gpt-image-2", headers=headers, json=payload, timeout=30)
@@ -158,6 +160,11 @@ def generate_image(
         if r.status_code == 403 and "locked" in r.text.lower():
             wait = 5 * (attempt + 1)
             log.warning(f"  fal lock (attempt {attempt + 1}/6) — retrying in {wait}s")
+            _time.sleep(wait)
+            continue
+        if r.status_code in (429, 500, 502, 503, 504):
+            wait = 5 * (attempt + 1)
+            log.warning(f"  fal {r.status_code} (attempt {attempt + 1}/6) — retrying in {wait}s")
             _time.sleep(wait)
             continue
         break

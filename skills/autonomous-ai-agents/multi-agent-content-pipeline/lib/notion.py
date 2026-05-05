@@ -24,26 +24,61 @@ from typing import Any, Optional
 import requests
 
 from .content_types import ContentPiece, ContentType
-from .platforms import LIMITS, needs_thread, split_thread
 
 log = logging.getLogger("zeus.notion")
 
 
-def _platform_caption(p: ContentPiece, platform: str) -> Optional[str]:
-    """Caption sent to a platform: same body, truncated to that platform's char limit."""
-    if not p.body:
-        return None
-    limit = LIMITS.get(platform)
-    return p.body[:limit] if limit else p.body
+def _platforms_posted(p: ContentPiece) -> list[str]:
+    """Subset of target_platforms with a real https permalink — for the
+    'Platforms Posted' multi_select. Lets the user filter the archive DB to
+    'show me everything that actually shipped on Twitter' without parsing text.
+    """
+    out: list[str] = []
+    for platform in p.target_platforms:
+        url = p.publer_job_ids.get(f"{platform}_url", "")
+        if url and isinstance(url, str) and url.startswith("http"):
+            out.append(platform)
+    return out
 
 
-def _twitter_archive_text(p: ContentPiece) -> Optional[str]:
-    """Twitter archive: thread joined with separators when body needs splitting, else first 280 chars."""
-    if not p.body:
+def _platforms_failed(p: ContentPiece) -> list[str]:
+    """Subset of target_platforms that reported FAILED at any stage."""
+    out: list[str] = []
+    for platform in p.target_platforms:
+        scheduled = str(p.publer_job_ids.get(platform, ""))
+        url = str(p.publer_job_ids.get(f"{platform}_url", ""))
+        if scheduled.startswith("FAILED") or url.startswith("FAILED"):
+            out.append(platform)
+    return out
+
+
+def _render_post_links(p: ContentPiece) -> Optional[str]:
+    """One ContentPiece -> one human-readable per-platform results block.
+
+    Replaces the old "Job IDs" dump that mashed job ids, URLs, and FAILED
+    markers together. Each line is `platform: <icon> <url-or-status>`.
+    Skips platforms that were never attempted so the field stays tight.
+    """
+    if not p.publer_job_ids:
         return None
-    if needs_thread(p.body):
-        return "\n\n---\n\n".join(split_thread(p.body))
-    return p.body[: LIMITS["twitter"]]
+    lines: list[str] = []
+    for platform in p.target_platforms:
+        scheduled = str(p.publer_job_ids.get(platform, ""))
+        url = str(p.publer_job_ids.get(f"{platform}_url", ""))
+        if not scheduled:
+            continue
+        if scheduled.startswith("FAILED"):
+            lines.append(f"{platform}: ✗ {scheduled}")
+        elif url.startswith("http"):
+            lines.append(f"{platform}: ✓ {url}")
+        elif url.startswith("FAILED"):
+            lines.append(f"{platform}: ✗ {url}")
+        elif url.startswith("PENDING"):
+            lines.append(f"{platform}: … {url}")
+        else:
+            lines.append(f"{platform}: scheduled (job={scheduled})")
+    return "\n".join(lines) or None
+
 
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"  # 2025-09-03 silently drops props on database ops
@@ -275,12 +310,27 @@ class NotionArchive:
     def _build_properties(
         self, p: ContentPiece, schema: dict, only_status: bool = False
     ) -> dict:
+        # Per-platform results live as STRUCTURED columns on the same row, not
+        # one-row-per-platform spam:
+        #   - "Post Links"        rich_text   — clean `platform: <icon> <url-or-status>` block
+        #   - "Platforms Posted"  multi_select — only platforms with a real https permalink
+        #   - "Platforms Failed"  multi_select — anything that returned FAILED
+        #   - "Job IDs"           rich_text   — debug only (raw Publer job ids, no URLs)
+        # Any field missing from the user's DB schema is silently skipped, so
+        # this is forward-compatible — add the columns in Notion when ready.
         wanted: dict[str, tuple[str, Any]] = {
             "Status": ("select", _humanize_status(p.status)),
             "Posted At": ("date", p.posted_at.isoformat() if p.posted_at else None),
+            "Post Links": ("rich_text", _trunc(_render_post_links(p))),
+            "Platforms Posted": ("multi_select", _platforms_posted(p)),
+            "Platforms Failed": ("multi_select", _platforms_failed(p)),
             "Job IDs": (
                 "rich_text",
-                "\n".join(f"{k}: {v}" for k, v in p.publer_job_ids.items()) or None,
+                "\n".join(
+                    f"{k}: {v}"
+                    for k, v in p.publer_job_ids.items()
+                    if not k.endswith("_url")
+                ) or None,
             ),
         }
         if not only_status:
@@ -300,13 +350,11 @@ class NotionArchive:
                     "Models Used": ("multi_select", p.models_used),
                     "Image URLs": ("rich_text", _trunc("\n".join(a.url for a in p.images))),
                     "Video URL": ("url", p.video.url if p.video else None),
-                    "Twitter": ("rich_text", _twitter_archive_text(p)),
-                    "Instagram": ("rich_text", _platform_caption(p, "instagram")),
-                    "LinkedIn": ("rich_text", _platform_caption(p, "linkedin")),
-                    "TikTok": ("rich_text", _platform_caption(p, "tiktok")),
-                    "YouTube": ("rich_text", _platform_caption(p, "youtube")),
-                    "Reddit": ("rich_text", _platform_caption(p, "reddit")),
-                    "Facebook": ("rich_text", _platform_caption(p, "facebook")),
+                    # Per-platform caption columns (Twitter / Instagram / ...) intentionally
+                    # dropped — under the unified-caption mandate every platform gets the same
+                    # body, so 7 columns of "same body truncated 7 different ways" was just
+                    # noise. The structured Post Links + Platforms Posted/Failed columns
+                    # already capture which platforms actually shipped and at what URL.
                 }
             )
         out: dict = {}
@@ -324,6 +372,9 @@ class NotionArchive:
         return out
 
     def _build_children(self, p: ContentPiece) -> list:
+        # Body paragraphs only. Media blocks are appended exclusively by
+        # update_assets() so the early-archive + recovery + update_assets
+        # sequence can never duplicate slides on the page.
         blocks: list[dict] = []
         if p.body:
             for chunk in _chunked(p.body, NOTION_TEXT_LIMIT):
@@ -336,22 +387,6 @@ class NotionArchive:
                         },
                     }
                 )
-        for img in p.images:
-            blocks.append(
-                {
-                    "object": "block",
-                    "type": "image",
-                    "image": {"type": "external", "external": {"url": img.url}},
-                }
-            )
-        if p.video and p.video.url:
-            blocks.append(
-                {
-                    "object": "block",
-                    "type": "video",
-                    "video": {"type": "external", "external": {"url": p.video.url}},
-                }
-            )
         return blocks
 
 

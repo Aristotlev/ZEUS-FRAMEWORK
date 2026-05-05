@@ -123,6 +123,19 @@ def _build_jobs(niche: List[str]):
         + common_outro
     )
 
+    carousel_slot = (
+        f"Generate and publish ONE {phrase} carousel (3-5 portrait slides) on "
+        f"a story from the past 4-6h that lends itself to visual breakdown — "
+        f"timeline, ranking, or step-by-step. Skip stories already covered "
+        f"today (check the Notion archive). Invoke the proper artifact-first "
+        f"pipeline via execute_code: "
+        f"`python skills/autonomous-ai-agents/multi-agent-content-pipeline/"
+        f"scripts/pipeline_test.py --type carousel --topic '<headline>' "
+        f"--slides 4 --publish` so the cost ledger, Notion archive, and "
+        f"crash-recovery flow all run. Be decisive — no questions."
+        + common_outro
+    )
+
     notion_ideas = (
         f"Process new team-submitted {phrase} ideas in the Notion content "
         f"ideas database (entries with no 'processed' tag). For each: "
@@ -149,6 +162,12 @@ def _build_jobs(niche: List[str]):
             "name": "zeus-content-article-slot",
             "schedule": "0 0,4,8,12,17,21 * * *",
             "prompt": article_slot,
+        },
+        {
+            "name": "zeus-content-carousel-slot",
+            # User-set: 12:30 PM and 12:30 AM daily (00:30 / 12:30).
+            "schedule": "30 0,12 * * *",
+            "prompt": carousel_slot,
         },
         {
             "name": "zeus-content-notion-ideas",
