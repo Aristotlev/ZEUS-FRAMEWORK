@@ -35,8 +35,8 @@ _HERMES_CORE_TOOLS = [
     "terminal", "process",
     # File manipulation
     "read_file", "write_file", "patch", "search_files",
-    # Vision + image generation
-    "vision_analyze", "image_generate",
+    # Vision + image/video/music generation
+    "vision_analyze", "image_generate", "video_generate", "music_generate",
     # Skills
     "skills_list", "skill_view", "skill_manage",
     # Browser automation
@@ -88,6 +88,38 @@ TOOLSETS = {
     "image_gen": {
         "description": "Creative generation tools (images)",
         "tools": ["image_generate"],
+        "includes": []
+    },
+
+    "video_gen": {
+        "description": "Video generation via fal.ai (Kling 2.5 Turbo Pro text-to-video and image-to-video)",
+        "tools": ["video_generate"],
+        "includes": []
+    },
+
+    "music_gen": {
+        "description": "Music generation via fal.ai (CassetteAI, Stable Audio)",
+        "tools": ["music_generate"],
+        "includes": []
+    },
+
+    "content_cron": {
+        "description": "Slim toolset for content automation cron jobs — research, generate, publish. Drops 27 tools (browser, terminal, HA, etc.) to keep system prompt small for fast TTFT in unattended loops.",
+        "tools": [
+            # Research
+            "web_search", "web_extract",
+            # Media generation
+            "image_generate", "video_generate", "music_generate",
+            "vision_analyze",
+            # API calls (Notion, Publer, AgentMail) via Python
+            "execute_code",
+            # Local file I/O for the pipeline
+            "read_file", "write_file", "search_files",
+            # Persistence + planning
+            "memory", "todo",
+            # Parallelism for multi-step pipelines
+            "delegate_task",
+        ],
         "includes": []
     },
     
@@ -266,8 +298,8 @@ TOOLSETS = {
             "terminal", "process",
             # File manipulation
             "read_file", "write_file", "patch", "search_files",
-            # Vision + image generation
-            "vision_analyze", "image_generate",
+            # Vision + image/video/music generation
+            "vision_analyze", "image_generate", "video_generate", "music_generate",
             # Skills
             "skills_list", "skill_view", "skill_manage",
             # Browser automation

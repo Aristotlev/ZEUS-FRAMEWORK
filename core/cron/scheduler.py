@@ -863,7 +863,16 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             except Exception as e:
                 logger.debug("Job '%s': failed to load credential pool for %s: %s", job_id, runtime_provider, e)
 
-        agent = AIAgent(
+        # Per-job toolset override — slim toolsets cut system-prompt size
+        # 5-10x for unattended loops (huge TTFT win on flash models).
+        job_toolsets = job.get("toolsets") or None
+        job_disabled_toolsets = list(job.get("disabled_toolsets") or [])
+        # Always disable interactive/messaging tools in cron context.
+        for default_off in ("cronjob", "messaging", "clarify"):
+            if default_off not in job_disabled_toolsets:
+                job_disabled_toolsets.append(default_off)
+
+        agent_kwargs = dict(
             model=model,
             api_key=runtime.get("api_key"),
             base_url=runtime.get("base_url"),
@@ -880,7 +889,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             providers_ignored=pr.get("ignore"),
             providers_order=pr.get("order"),
             provider_sort=pr.get("sort"),
-            disabled_toolsets=["cronjob", "messaging", "clarify"],
+            disabled_toolsets=job_disabled_toolsets,
             quiet_mode=True,
             skip_context_files=True,  # Don't inject SOUL.md/AGENTS.md from scheduler cwd
             skip_memory=True,  # Cron system prompts would corrupt user representations
@@ -888,6 +897,10 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             session_id=_cron_session_id,
             session_db=_session_db,
         )
+        if job_toolsets:
+            agent_kwargs["enabled_toolsets"] = job_toolsets
+
+        agent = AIAgent(**agent_kwargs)
         
         # Run the agent with an *inactivity*-based timeout: the job can run
         # for hours if it's actively calling tools / receiving stream tokens,

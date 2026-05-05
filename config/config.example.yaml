@@ -78,3 +78,20 @@ approvals:
 security:
   redact_secrets: true
   tirith_enabled: true
+
+# Content pipeline cron jobs (scripts/setup_content_cron.py).
+# Set your niche/subcategories here — the cron jobs prompt Zeus to research,
+# write, and publish in these topics. Accepts a string or a list.
+content_pipeline:
+  # Examples:
+  #   niche: "personal finance"
+  #   niche: [finance, crypto, stocks, forex, geopolitics]
+  #   niche: [ai, machine learning, tech startups]
+  niche: []  # ← set this before running setup_content_cron.py
+
+  # Model used by the content cron jobs. Pick a fast, high-throughput model
+  # — flagship reasoning models (deepseek-v4-pro, etc.) cold-start and
+  # timeout in 20-40 turn agent loops. Defaults below are fast + cheap.
+  cron_model: deepseek/deepseek-v4-flash
+  cron_provider: openrouter
+  cron_base_url: https://openrouter.ai/api/v1

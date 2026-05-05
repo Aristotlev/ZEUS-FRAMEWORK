@@ -30,7 +30,12 @@ logger = logging.getLogger(__name__)
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-_MCP_PRESETS: Dict[str, Dict[str, Any]] = {}
+_MCP_PRESETS: Dict[str, Dict[str, Any]] = {
+    "fal": {
+        "url": "https://mcp.fal.ai/mcp",
+        "headers": {"Authorization": "Bearer ${FAL_KEY}"},
+    },
+}
 
 
 # ─── UI Helpers ───────────────────────────────────────────────────────────────
@@ -151,6 +156,10 @@ def _apply_mcp_preset(
         server_config["command"] = command
     if cmd_args:
         server_config["args"] = cmd_args
+
+    preset_headers = preset.get("headers")
+    if isinstance(preset_headers, dict):
+        server_config.setdefault("headers", {}).update(preset_headers)
 
     return url, command, cmd_args, True
 
@@ -299,8 +308,9 @@ def cmd_mcp_add(args):
                 _info("Cancelled.")
                 return
 
-    elif url:
+    elif url and "headers" not in server_config:
         # Prompt for API key / Bearer token for HTTP servers
+        # (skip when a preset already injected headers, e.g. fal)
         print()
         _info(f"Connecting to {url}")
         needs_auth = _confirm("Does this server require authentication?", default=True)

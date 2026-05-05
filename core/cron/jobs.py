@@ -384,6 +384,8 @@ def create_job(
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
     script: Optional[str] = None,
+    toolsets: Optional[List[str]] = None,
+    disabled_toolsets: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -434,6 +436,19 @@ def create_job(
     normalized_script = str(script).strip() if isinstance(script, str) else None
     normalized_script = normalized_script or None
 
+    def _norm_toolset_list(value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return [t.strip() for t in value.split(",") if t.strip()] or None
+        if isinstance(value, list):
+            cleaned = [str(t).strip() for t in value if str(t).strip()]
+            return cleaned or None
+        return None
+
+    normalized_toolsets = _norm_toolset_list(toolsets)
+    normalized_disabled_toolsets = _norm_toolset_list(disabled_toolsets)
+
     label_source = (prompt or (normalized_skills[0] if normalized_skills else None)) or "cron job"
     job = {
         "id": job_id,
@@ -445,6 +460,8 @@ def create_job(
         "provider": normalized_provider,
         "base_url": normalized_base_url,
         "script": normalized_script,
+        "toolsets": normalized_toolsets,
+        "disabled_toolsets": normalized_disabled_toolsets,
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),
         "repeat": {
