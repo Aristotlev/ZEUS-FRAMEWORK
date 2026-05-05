@@ -80,7 +80,7 @@ Create these files in the repo root:
 - `.gitignore` — venv, __pycache__, .env, *.pem, logs, data
 - `soul/SOUL.md` — identity, memory architecture diagram, principles, stack diagram
 - `core/SOUL.md` — copy of soul/SOUL.md so the core engine loads it (shared soul)
-- `STACK.md` — full stack directory guide explaining every component including OpenClaw
+- `docs/architecture.md` — full stack directory guide explaining every component including OpenClaw
 
 ### 5. Git init and commit
 

@@ -1,160 +1,142 @@
-# ⚡ Zeus Framework
+<p align="center">
+  <img src="assets/banner.svg" alt="Zeus Framework" width="100%"/>
+</p>
 
-A fully local, memory-persistent AI agent framework built on [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+<h1 align="center">Zeus Framework <sup>⚡</sup></h1>
 
-Zeus adds soul — a 4-layer memory architecture, vector memory plugin, distributed execution, and **automated content creation pipelines** that run entirely on your hardware.
+<p align="center">
+  <a href="docs/README.md"><img alt="Docs" src="https://img.shields.io/badge/docs-zeus--framework-1f6feb?logo=readthedocs&logoColor=white"/></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-fbbf24"/></a>
+  <a href="https://github.com/NousResearch/hermes-agent"><img alt="Built on Hermes Agent" src="https://img.shields.io/badge/built%20on-Hermes%20Agent-7c3aed"/></a>
+  <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-3776ab?logo=python&logoColor=white"/>
+  <a href="https://github.com/Aristotlev/ZEUS-FRAMEWORK/issues"><img alt="Issues" src="https://img.shields.io/github/issues/Aristotlev/ZEUS-FRAMEWORK?color=ef4444"/></a>
+</p>
 
-## What's Inside
+<p align="center">
+  <b>Local-first, memory-persistent AI agent framework with built-in content automation.</b><br/>
+  A Soul + 4-layer memory + content pipeline assembled on top of <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a> by <a href="https://nousresearch.com">Nous Research</a>.
+</p>
 
-```
-zeus-framework/
-├── core/                   # Hermes Agent source (the engine)
-├── stack/                  # HermesStack — Redis + pgvector interface
-├── plugins/
-│   └── mnemosyne/          # L3 vector memory plugin (Redis + pgvector)
-├── skills/                 # 98+ procedural skills (L4 memory)
-│   └── autonomous-ai-agents/
-│       └── multi-agent-content-pipeline/
-│           ├── lib/        # fal.py, fish.py, notion.py, platforms.py, ledger.py, email_notify.py, content_types.py
-│           ├── scripts/    # pipeline_test.py — canonical orchestrator
-│           └── references/ # Publer API reference, cost analysis
-├── soul/                   # SOUL.md — identity, memory architecture, principles
-├── config/                 # Config templates (sanitized, no secrets)
-├── memory/                 # Memory templates and schemas
-├── scripts/                # Start scripts, setup helpers, cron setup
-└── setup/                  # pgvector setup, deployment guides
-```
+---
 
-## Memory Architecture
+Zeus is what you get when you take Hermes Agent and bolt on the things you'd otherwise have to wire up yourself: a vector-memory plugin, distributed compute on cheap ARM nodes, an opinionated content-creation pipeline, and a Soul file that gives the agent a stable identity across sessions. Everything runs on your hardware. Memory persists across restarts. Skills compound with use.
 
-| Layer | Name | Storage | Purpose |
-|-------|------|---------|---------|
-| L1 | In-context | Context window | Working memory, current task |
-| L2 | Episodic | Session search + memory files | What happened, past decisions |
-| L3 | Semantic | pgvector + Redis | What it knows, semantic recall |
-| L4 | Procedural | Skills system (SKILL.md files) | How to do things |
+Multi-provider model support is inherited from Hermes (OpenRouter, Anthropic, OpenAI, DeepSeek, Mistral, Vercel, vLLM, llama.cpp, Ollama, HuggingFace, …) — switch models mid-session, route by task, mix paid + local.
 
-## Quick Start
+## Features
 
-> **Ubuntu one-liner — everything automated.** See [INSTALL.md](INSTALL.md) for full docs.
+| | |
+|---|---|
+| **🖥️  Terminal-native** | The agent runs in your shell. No browser, no cloud panel. CLI, TUI, or messaging-gateway. |
+| **🧠  4-layer memory** | In-context → episodic → **semantic (pgvector)** → procedural (skills). Every layer swappable. |
+| **🎬  Content automation** | One command turns a topic into Article / LongArticle / Carousel / ShortVideo / LongVideo across 7 platforms — fal.ai images, Kling video, fish.audio TTS, Notion archive, Publer distribution. |
+| **⏰  Idempotent crons** | Three shipped jobs research + draft + publish on schedule. Niche-agnostic. Re-run setup to update; never duplicates. |
+| **☁️  Distributed compute** | OpenClaw runs heavy workloads on Oracle ARM (Ampere A1) free-tier instances. Zeus delegates and returns. |
+| **🏗️  Production-ready** | Single-script Hetzner deploy with auto-TLS (Caddy), daily backups, status dashboard, remote trigger endpoint. |
+| **🛡️  Honest cost tracking** | Every run, every model, every dollar appended to a JSONL ledger. Email summaries with 24h / 7d / 30d / all-time rollups. No surprises. |
+
+## Quick Install
+
+> **One script.** Ubuntu / WSL2 / macOS. Installs Python, Redis, PostgreSQL 16, pgvector, Hermes Agent, and the Zeus stack.
 
 ```bash
-# 1. Clone Zeus
 git clone https://github.com/Aristotlev/ZEUS-FRAMEWORK.git zeus
 cd zeus
-
-# 2. Run the installer (Python, Redis, PostgreSQL, pgvector, Hermes, OpenRouter — all automated)
 chmod +x install.sh
 ./install.sh
 ```
 
-The installer will ask for your **[OpenRouter API key](https://openrouter.ai/keys)** (free tier available) and sets up everything.
+The installer prompts for an [OpenRouter API key](https://openrouter.ai/keys) (free tier available, no card needed) and writes `~/.hermes/.env`.
+
+After install:
 
 ```bash
-# After install:
-source ~/.bashrc     # reload PATH
-hermes doctor        # verify everything is healthy
-hermes               # start Zeus ⚡
+source ~/.bashrc       # or ~/.zshrc
+zeus doctor            # verify everything is healthy
+zeus                   # start the agent
 ```
 
-### Already running Hermes? Upgrade to Zeus in one command:
+> The legacy `hermes` command still works — same binary.
+
+### Already running Hermes? Upgrade in one command:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Aristotlev/ZEUS-FRAMEWORK/main/scripts/zeus-upgrade.sh)
 ```
 
-→ **[Full installation guide & troubleshooting](INSTALL.md)**
+→ Full guide: **[docs/installation.md](docs/installation.md)**
 
-## 🎬 Content Automation System
+## Commands
 
-Generate professional content across Twitter, Instagram, LinkedIn, TikTok, YouTube, Reddit, and Facebook from a single command. Every run archives to Notion BEFORE any external API spend, downloads media locally, appends to a persistent cost ledger, and emails a summary with post links + always-on cost analysis.
+| Command | What it does |
+|---|---|
+| `zeus` | Start an interactive session (default) |
+| `zeus doctor` | Health-check every layer (Redis, Postgres, pgvector, Hermes, OpenRouter) |
+| `zeus gateway install` | Install a Discord / Telegram / Slack / WhatsApp / Signal gateway |
+| `zeus cron start` | Run the cron daemon (foreground) |
+| `zeus cron daemon` | Run the cron daemon (background) |
+| `zeus cron list` | List installed cron jobs |
+| `python scripts/setup_content_cron.py` | Install the three content cron jobs for your niche |
+| `python skills/.../scripts/pipeline_test.py --type <T> --topic "<...>"` | Run the content pipeline manually for a single piece |
 
-### 4 Content Types (canonical taxonomy, May 2026)
+## Documentation
 
-| Type | Media | Platforms | Description |
-|------|-------|-----------|-------------|
-| **Article** | 1 image (1024x1024 default) + long description | Twitter, IG, LinkedIn, TikTok | 550-900 chars (clears "read more" everywhere) |
-| **Carousel** | 3-5 slide images + long description | Twitter, IG, LinkedIn, TikTok | 550-900 chars |
-| **Short-form Video** | 1080x1920, <90s | Twitter, IG (reel), LinkedIn, TikTok, YouTube Shorts | Mobile-native portrait |
-| **Long-form Video** | 1920x1080 | YouTube, Twitter, LinkedIn, Reddit | Landscape, 16:9 |
+| Guide | What it covers |
+|---|---|
+| [Installation](docs/installation.md) | One-script install, env vars, upgrade path |
+| [Architecture](docs/architecture.md) | Top-level layout: `core/`, `stack/`, `plugins/`, `skills/`, `openclaw/` |
+| [Memory model](docs/memory.md) | The 4 memory layers, swapping any of them |
+| [Content pipeline](docs/content-pipeline.md) | The 5-type content automation system + cost analysis |
+| [Cron](docs/cron.md) | Three idempotent content cron jobs and how to configure your niche |
+| [Skills](docs/skills.md) | The 98+ procedural skills shipped with Zeus, by domain |
+| [pgvector setup](docs/pgvector.md) | User-owned PostgreSQL 16 + pgvector setup (no sudo) |
+| [OpenClaw](docs/openclaw.md) | Distributed compute on Oracle ARM nodes |
+| [Deployment](docs/deployment.md) | Single-VM Hetzner deploy with Caddy, Postgres, daily backups |
+| [Contributing](CONTRIBUTING.md) | Where each kind of change lives + PR checklist |
+| [Security](SECURITY.md) | Reporting vulnerabilities, scope, what's in/out |
 
-A single `ContentPiece` dataclass (`skills/autonomous-ai-agents/multi-agent-content-pipeline/lib/content_types.py`) flows through every stage: text gen → variants → media → archive → publish → ledger → email.
+## Memory Architecture
 
-### Cost-Optimized Media Stack (May 2026)
+| Layer | Name | Storage | Purpose |
+|---|---|---|---|
+| **L1** | In-context | Model context window | Working memory, current task |
+| **L2** | Episodic | Hermes session search + memory files | What happened, past decisions |
+| **L3** | Semantic | PostgreSQL + pgvector (Mnemosyne plugin) | What it knows, semantic recall |
+| **L4** | Procedural | Skill `SKILL.md` files | How to do things |
 
-- **LLM:** OpenRouter `google/gemini-2.5-flash` (~$0.001/post)
-- **Images:** fal.ai `openai/gpt-image-2` (~$0.04 medium / $0.16 high quality at 1920x1080)
-- **Video:** fal.ai `kling-video/v2.5-turbo/pro` ($0.35 first 5s + $0.07/s — 1080p in either orientation)
-- **TTS:** **fish.audio** S1 — `https://api.fish.audio/v1/tts` (~$15/1M chars). User mandate: TTS only via fish.audio.
-- **Music:** fal.ai `cassetteai/music-generator` (~$0.05/clip, swappable)
-- **Publishing:** Publer API (single key, all platforms)
-- **Archive:** Notion (Omnifolio Content Hub auto-discovered)
-- **Notifications:** Resend / AgentMail / Gmail SMTP (auto-pick by configured env)
-- **Cost ledger:** `~/.hermes/zeus_cost_ledger.jsonl` — every run, every model, every dollar
+Detailed: [docs/memory.md](docs/memory.md).
 
-**Stack notes:**
-- **Replicate is dead.** Removed entirely after May 2026 — burned $15 on generations that were never archived. All media now flows through `lib/fal.py` with mandatory local download + Notion archive before any publish step.
-- **Notion archive** auto-discovers the archive database under the Omnifolio Content Hub page on first run; cached at `~/.hermes/notion_ids.json`.
-- **Email summaries** sent after every run with social media post links + 24h/7d/30d/all-time cost rollups.
+## Content Automation at a glance
 
-### Daily Cron Automation
+Generate professional content across **Twitter, Instagram, LinkedIn, TikTok, YouTube, Reddit, Facebook** from a single command. Every run archives to Notion **before** any external API spend, downloads media locally, appends to a persistent cost ledger, and emails a summary with post links + always-on cost rollups.
 
-Three idempotent cron jobs ship with Zeus (`scripts/setup_content_cron.py`) — set `content_pipeline.niche` in `~/.hermes/config.yaml` then run the script:
+| Type | Media | Targets |
+|---|---|---|
+| **Article** | 1 image (1024×1024) | Twitter, IG, LinkedIn, TikTok |
+| **LongArticle** | 1 image + thread | Twitter (thread), IG, LinkedIn, TikTok |
+| **Carousel** | 3–5 portrait slides | Twitter, IG, LinkedIn, TikTok |
+| **ShortVideo** | 1080×1920, <90s | Twitter, IG (reel), LinkedIn, TikTok, YouTube Shorts |
+| **LongVideo** | 1920×1080 | YouTube, Twitter, LinkedIn, Reddit |
 
-- `zeus-content-article-slot` — every 4-6h: research + draft + publish a long-form article on the freshest niche story
-- `zeus-content-notion-ideas` — daily 07:00: process team-submitted ideas from the Notion content database
-- `zeus-content-daily-crawl` — daily 06:00: crawl the day's headlines, build a 6-story content brief
+Stack: OpenRouter (text) · fal.ai GPT-Image-2 (images) · fal.ai Kling Turbo Pro (video) · fish.audio (TTS) · cassetteai/music-generator (music) · Publer (distribution) · Notion (archive).
 
-### Quick Start — Content System
+Detailed: [docs/content-pipeline.md](docs/content-pipeline.md).
 
-```bash
-# 1. Set required keys in ~/.hermes/.env:
-#    OPENROUTER_API_KEY, FAL_KEY, NOTION_API_KEY, PUBLER_API_KEY, FISH_AUDIO_API_KEY
-#    (optional) RESEND_API_KEY or AGENTMAIL_API_KEY for the post-run email
-#    (optional) ZEUS_NOTIFY_EMAIL — defaults to ariscsc@gmail.com
+## Skills
 
-# 2. Install Python deps
-pip install fal-client requests
+98+ skills across `apple/`, `autonomous-ai-agents/`, `creative/`, `data-science/`, `devops/`, `email/`, `gaming/`, `github/`, `mcp/`, `media/`, `mlops/`, `productivity/`, `red-teaming/`, `research/`, `smart-home/`, `social-media/`, `software-development/`.
 
-# 3. Generate + archive (no posting yet — safe mode)
-cd skills/autonomous-ai-agents/multi-agent-content-pipeline/scripts
-export $(grep -v '^#' ~/.hermes/.env | xargs)
-python3 pipeline_test.py --type article --topic "Bitcoin breaks 100K"
+Browse all: [docs/skills.md](docs/skills.md).
 
-# 4. When ready, post to Publer
-python3 pipeline_test.py --type article --topic "..." --publish
-```
-
-Every run: archives to Notion BEFORE any external API spend, downloads media locally, appends to `~/.hermes/zeus_cost_ledger.jsonl`, and sends an email summary.
-
-## Skills (L4 Memory)
-
-98+ skills across domains:
-
-- **autonomous-ai-agents** — Claude Code, Codex, OpenCode, subagent delegation, multi-agent content pipeline
-- **creative** — ASCII art, diagrams, infographics, Excalidraw, pixel art
-- **data-science** — Jupyter live kernel
-- **devops** — Remote access, pgvector setup, webhooks, Wake-on-LAN system
-- **email** — Himalaya IMAP/SMTP, multi-backend email (AgentMail, Gmail, Proton, Resend/SendGrid)
-- **gaming** — Minecraft modpack servers, Pokemon
-- **github** — Auth, code review, issues, PRs, repo management
-- **mcp** — Model Context Protocol client
-- **media** — YouTube, GIFs, music generation, spectrograms
-- **mlops** — HuggingFace, evaluation, inference, training, research
-- **productivity** — Google Workspace, Notion, PDFs, PowerPoint
-- **red-teaming** — LLM jailbreak techniques
-- **research** — arXiv, blog monitoring, prediction markets, competitive analysis
-- **smart-home** — Philips Hue
-- **social-media** — X/Twitter
-- **software-development** — Planning, TDD, debugging, code review
-
-## The Stack
+## Stack
 
 - **Redis** — Task queue + L1 cache (hot paths)
 - **PostgreSQL + pgvector** — L3 semantic memory (1536-dim embeddings)
-- **Mnemosyne** — Memory plugin with circuit breaker, auto-mirror, session summarization
-- **OpenClaw** — Distributed execution on Oracle ARM nodes
+- **Mnemosyne** — Memory plugin: circuit breaker, auto-mirror, session summarization
+- **OpenClaw** — Distributed execution on Oracle ARM free-tier nodes
 - **Hermes Agent** — Core engine with 50+ built-in tools
+
+Detailed: [docs/architecture.md](docs/architecture.md).
 
 ## Philosophy
 
@@ -162,12 +144,17 @@ Every run: archives to Notion BEFORE any external API spend, downloads media loc
 
 All data stays on your machine. No cloud dependencies for storage. Skills and knowledge grow with use. Circuit breakers and fallback models ensure graceful degradation. Every layer can be swapped or extended.
 
+## Contributing
+
+PRs welcome. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for where each kind of change lives, the PR checklist, and the no-secrets rule.
+
+Security issues: please use [GitHub's private vulnerability reporting](https://github.com/Aristotlev/ZEUS-FRAMEWORK/security/advisories/new). See [SECURITY.md](SECURITY.md).
+
 ## License
 
-Hermes Agent core: See core/LICENSE
-Zeus additions (stack, plugins, soul, skills, config): MIT
+MIT — see [LICENSE](LICENSE). The `core/` directory is vendored from [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) under its own license; see `core/LICENSE`.
 
 ## Credits
 
-Built on [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research.
-Zeus Framework assembled and configured by [example-user](https://github.com/example-user).
+Built on [Hermes Agent](https://github.com/NousResearch/hermes-agent) by [Nous Research](https://nousresearch.com).
+Zeus Framework assembled and maintained by [Aristotlev](https://github.com/Aristotlev).

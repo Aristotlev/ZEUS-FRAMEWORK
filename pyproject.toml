@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zeus-framework"
+version = "0.1.0"
+description = "Local-first, memory-persistent AI agent framework. A thin Soul + memory + content-automation layer on top of Hermes Agent."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Aristotlev", url = "https://github.com/Aristotlev" }]
+keywords = ["ai", "agent", "hermes", "memory", "pgvector", "content-automation", "local-first"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    # Stack
+    "redis>=5.0",
+    "psycopg[binary]>=3.1",
+    "pgvector>=0.2.4",
+    # Content pipeline
+    "fal-client>=0.5",
+    "requests>=2.31",
+    "pyyaml>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Aristotlev/ZEUS-FRAMEWORK"
+Issues = "https://github.com/Aristotlev/ZEUS-FRAMEWORK/issues"
+Repository = "https://github.com/Aristotlev/ZEUS-FRAMEWORK"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[tool.setuptools]
+# Zeus is intentionally not a single importable package — its components live in
+# top-level dirs (plugins/, stack/, skills/) that are wired in at install time
+# by install.sh. This pyproject.toml exists for metadata, doc generation, and
+# `pip install -e .[dev]` to pull dev tooling.
+py-modules = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
