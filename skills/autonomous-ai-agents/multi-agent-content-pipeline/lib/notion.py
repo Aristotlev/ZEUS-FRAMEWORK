@@ -149,11 +149,15 @@ class NotionArchive:
             or os.getenv("ZEUS_NOTION_HUB_PAGE_ID")
             or os.getenv("NOTION_CONTENT_HUB_PAGE_ID")
         )
+        # Skip the parent-page discovery walk entirely if the archive DB is
+        # supplied directly. NOTION_ARCHIVE_DB_ID is the documented var name
+        # in deploy/.env.prod.example and what users actually set in prod.
+        archive_db_id = archive_db_id or os.getenv("NOTION_ARCHIVE_DB_ID")
         if not hub and not archive_db_id:
             raise RuntimeError(
                 "Set ZEUS_NOTION_HUB_PAGE_ID to the 32-char hex id of your Notion "
                 "content-hub page (the trailing id in the page URL), or pass "
-                "archive_db_id directly."
+                "archive_db_id directly (or set NOTION_ARCHIVE_DB_ID)."
             )
         self.hub_page_id = _hyphenate(hub) or hub
         self._archive_db_id: Optional[str] = _hyphenate(archive_db_id)
