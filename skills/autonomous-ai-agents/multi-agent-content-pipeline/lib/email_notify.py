@@ -12,6 +12,8 @@ Backend selection (first one configured wins):
   4. File         (always)                 — last resort: writes the email body to a local file so nothing is lost
 
 Recipient is read from ZEUS_NOTIFY_EMAIL — required. No hardcoded fallback.
+Comma-separated values are supported (e.g. "alice@x.com,bob@y.com") so multiple
+people get the same run-completion email.
 """
 from __future__ import annotations
 
@@ -31,6 +33,10 @@ from .ledger import summary as ledger_summary
 log = logging.getLogger("zeus.email")
 
 DEFAULT_RECIPIENT = os.getenv("ZEUS_NOTIFY_EMAIL", "")
+
+
+def _split_recipients(value: str) -> list[str]:
+    return [a.strip() for a in value.split(",") if a.strip()]
 FROM_NAME = os.getenv("ZEUS_NOTIFY_FROM_NAME", "Zeus Pipeline")
 FROM_EMAIL_FALLBACK = os.getenv("ZEUS_NOTIFY_FROM_EMAIL", "")
 LOCAL_INBOX = Path(os.path.expanduser("~/.hermes/zeus_email_outbox"))
@@ -42,8 +48,9 @@ def _notion_url(page_id: str) -> str:
 
 def send_pipeline_summary(piece: ContentPiece, recipient: Optional[str] = None) -> str:
     """Send the post-run summary. Returns the backend that handled it ('resend'|'agentmail'|'smtp'|'file')."""
-    to_addr = recipient or DEFAULT_RECIPIENT
-    if not to_addr:
+    raw = recipient or DEFAULT_RECIPIENT
+    to_list = _split_recipients(raw)
+    if not to_list:
         raise RuntimeError(
             "ZEUS_NOTIFY_EMAIL is not set and no recipient was passed. "
             "Set ZEUS_NOTIFY_EMAIL in ~/.hermes/.env (or pass recipient=...)."
@@ -53,20 +60,20 @@ def send_pipeline_summary(piece: ContentPiece, recipient: Optional[str] = None) 
     text = _text_body(piece)
 
     backend = _pick_backend()
-    log.info(f"email backend: {backend} -> {to_addr}")
+    log.info(f"email backend: {backend} -> {to_list}")
     try:
         if backend == "resend":
-            _send_resend(to_addr, subject, html, text)
+            _send_resend(to_list, subject, html, text)
         elif backend == "agentmail":
-            _send_agentmail(to_addr, subject, html, text)
+            _send_agentmail(to_list, subject, html, text)
         elif backend == "smtp":
-            _send_gmail_smtp(to_addr, subject, html, text)
+            _send_gmail_smtp(to_list, subject, html, text)
         else:
-            _save_file(to_addr, subject, html, text)
+            _save_file(to_list, subject, html, text)
             backend = "file"
     except Exception as e:
         log.error(f"email backend {backend} failed: {e}; falling back to file")
-        _save_file(to_addr, subject, html, text)
+        _save_file(to_list, subject, html, text)
         backend = "file"
     return backend
 
@@ -359,19 +366,19 @@ def _html_body(p: ContentPiece) -> str:
 
 # ---- backends ------------------------------------------------------------
 
-def _send_resend(to: str, subject: str, html: str, text: str) -> None:
+def _send_resend(to: list[str], subject: str, html: str, text: str) -> None:
     key = os.environ["RESEND_API_KEY"]
     sender = os.getenv("RESEND_FROM", FROM_EMAIL_FALLBACK)
     r = requests.post(
         "https://api.resend.com/emails",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={"from": f"{FROM_NAME} <{sender}>", "to": [to], "subject": subject, "html": html, "text": text},
+        json={"from": f"{FROM_NAME} <{sender}>", "to": to, "subject": subject, "html": html, "text": text},
         timeout=15,
     )
     r.raise_for_status()
 
 
-def _send_agentmail(to: str, subject: str, html: str, text: str) -> None:
+def _send_agentmail(to: list[str], subject: str, html: str, text: str) -> None:
     key = os.environ["AGENTMAIL_API_KEY"]
     inbox = os.environ.get("AGENTMAIL_INBOX")
     if not inbox:
@@ -379,28 +386,28 @@ def _send_agentmail(to: str, subject: str, html: str, text: str) -> None:
     r = requests.post(
         f"https://api.agentmail.to/v0/inboxes/{inbox}/messages/send",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={"to": [to], "subject": subject, "html": html, "text": text},
+        json={"to": to, "subject": subject, "html": html, "text": text},
         timeout=15,
     )
     r.raise_for_status()
 
 
-def _send_gmail_smtp(to: str, subject: str, html: str, text: str) -> None:
+def _send_gmail_smtp(to: list[str], subject: str, html: str, text: str) -> None:
     user = os.environ["HERMES_GMAIL_USER"]
     password = os.environ["HERMES_GMAIL_APP_PASSWORD"]
     msg = EmailMessage()
     msg["From"] = f"{FROM_NAME} <{user}>"
-    msg["To"] = to
+    msg["To"] = ", ".join(to)
     msg["Subject"] = subject
     msg.set_content(text)
     msg.add_alternative(html, subtype="html")
     with smtplib.SMTP("smtp.gmail.com", 587) as s:
         s.starttls()
         s.login(user, password)
-        s.send_message(msg)
+        s.send_message(msg, to_addrs=to)
 
 
-def _save_file(to: str, subject: str, html: str, text: str) -> Path:
+def _save_file(to: list[str], subject: str, html: str, text: str) -> Path:
     LOCAL_INBOX.mkdir(parents=True, exist_ok=True)
     from datetime import datetime
     name = datetime.utcnow().strftime("%Y%m%dT%H%M%S") + ".txt"
