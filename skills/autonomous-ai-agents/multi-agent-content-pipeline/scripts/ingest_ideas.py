@@ -90,12 +90,13 @@ from lib import (  # noqa: E402
     send_pipeline_summary,
 )
 import pipeline_test  # noqa: E402  -- reuse generate_media_for / openrouter_chat / ARTIFACT_ROOT
+from lib.paths import zeus_data_path  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("ingest-ideas")
 
 NOTION_API = "https://api.notion.com/v1"
-CONFIG_PATH = pathlib.Path(os.path.expanduser("~/.hermes/notion_ids.json"))
+CONFIG_PATH = zeus_data_path("notion_ids.json")
 
 NEW_STATUS = "New"
 LOCK_STATUS = "Processing"

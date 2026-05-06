@@ -21,9 +21,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+from .paths import zeus_data_path
+
 log = logging.getLogger("zeus.fal")
 
-FAL_CALL_LOG = Path(os.path.expanduser("~/.hermes/zeus_fal_calls.jsonl"))
+FAL_CALL_LOG = zeus_data_path("zeus_fal_calls.jsonl")
 
 
 def _log_fal_call(

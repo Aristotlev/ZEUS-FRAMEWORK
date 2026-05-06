@@ -22,10 +22,12 @@ from typing import Literal, Optional
 
 import requests
 
+from .paths import zeus_data_path
+
 log = logging.getLogger("zeus.fish")
 
 FISH_API = "https://api.fish.audio/v1/tts"
-FISH_CALL_LOG = Path(os.path.expanduser("~/.hermes/zeus_fish_calls.jsonl"))
+FISH_CALL_LOG = zeus_data_path("zeus_fish_calls.jsonl")
 DEFAULT_MODEL = "s1"  # s1 = $15/1M chars; s2-pro is the premium tier
 
 

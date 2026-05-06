@@ -1,7 +1,8 @@
 """
 Persistent cost ledger for Zeus content pipeline.
 
-Append-only JSONL at ~/.hermes/zeus_cost_ledger.jsonl. Every pipeline run writes one
+Append-only JSONL at $HERMES_HOME/.hermes/zeus_cost_ledger.jsonl (or ~/.hermes/
+when HERMES_HOME is unset). Every pipeline run writes one
 row. The "always-on cost analysis" the user wants in every notification email pulls
 from here — current run, today, last 7 days, last 30 days.
 
@@ -29,8 +30,9 @@ from pathlib import Path
 from typing import Optional
 
 from .content_types import ContentPiece
+from .paths import zeus_data_path
 
-LEDGER_PATH = Path(os.path.expanduser("~/.hermes/zeus_cost_ledger.jsonl"))
+LEDGER_PATH = zeus_data_path("zeus_cost_ledger.jsonl")
 
 
 def append_entry(piece: ContentPiece) -> dict:

@@ -32,12 +32,13 @@ SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent))
 
 from lib import NotionArchive  # noqa: E402
+from lib.paths import zeus_data_path  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("ensure-ideas-db")
 
 NOTION_API = "https://api.notion.com/v1"
-CONFIG_PATH = pathlib.Path(os.path.expanduser("~/.hermes/notion_ids.json"))
+CONFIG_PATH = zeus_data_path("notion_ids.json")
 
 
 _SOURCE_TYPE_OPTIONS = [

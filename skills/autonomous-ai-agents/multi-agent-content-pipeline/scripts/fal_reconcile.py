@@ -37,8 +37,13 @@ from typing import Optional
 
 import requests
 
-FAL_CALL_LOG = pathlib.Path(os.path.expanduser("~/.hermes/zeus_fal_calls.jsonl"))
-RECONCILED_LOG = pathlib.Path(os.path.expanduser("~/.hermes/zeus_fal_reconciled.jsonl"))
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR.parent))
+
+from lib.paths import zeus_data_path  # noqa: E402
+
+FAL_CALL_LOG = zeus_data_path("zeus_fal_calls.jsonl")
+RECONCILED_LOG = zeus_data_path("zeus_fal_reconciled.jsonl")
 
 # fal exposes billing at a few possible endpoints depending on org. Try each;
 # whichever works wins. None is guaranteed to be reachable with FAL_KEY alone.

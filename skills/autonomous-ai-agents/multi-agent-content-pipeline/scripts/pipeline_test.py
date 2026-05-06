@@ -87,6 +87,7 @@ from lib import (  # noqa: E402
     send_pipeline_summary,
     split_thread,
 )
+from lib.paths import zeus_data_path  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("zeus-pipeline")
@@ -268,7 +269,7 @@ def _allowed_domains_for_niches(niches: list[str]) -> set[str]:
 # rarely appear. Round-robin gives even coverage: with 6 niches and ~5 cron
 # slots/day, every niche gets a turn every ~1.2 days.
 # ---------------------------------------------------------------------------
-_NICHE_ROTATION_PATH = pathlib.Path(os.path.expanduser("~/.hermes/niche_rotation.json"))
+_NICHE_ROTATION_PATH = zeus_data_path("niche_rotation.json")
 
 
 def _pick_next_niche() -> str:
@@ -705,7 +706,7 @@ def _safe_topic(topic: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in topic)[:40] or "untitled"
 
 
-ARTIFACT_ROOT = pathlib.Path(os.path.expanduser("~/.hermes/zeus_artifacts"))
+ARTIFACT_ROOT = zeus_data_path("zeus_artifacts")
 
 
 class _Phase:

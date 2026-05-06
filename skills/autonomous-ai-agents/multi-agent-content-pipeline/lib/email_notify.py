@@ -29,6 +29,7 @@ import requests
 
 from .content_types import ContentPiece, ContentType
 from .ledger import summary as ledger_summary
+from .paths import zeus_data_path
 
 log = logging.getLogger("zeus.email")
 
@@ -39,7 +40,7 @@ def _split_recipients(value: str) -> list[str]:
     return [a.strip() for a in value.split(",") if a.strip()]
 FROM_NAME = os.getenv("ZEUS_NOTIFY_FROM_NAME", "Zeus Pipeline")
 FROM_EMAIL_FALLBACK = os.getenv("ZEUS_NOTIFY_FROM_EMAIL", "")
-LOCAL_INBOX = Path(os.path.expanduser("~/.hermes/zeus_email_outbox"))
+LOCAL_INBOX = zeus_data_path("zeus_email_outbox")
 
 
 def _notion_url(page_id: str) -> str:

@@ -11,8 +11,9 @@ or as a long-running daemon) polls the queue, captures live post URLs, patches
 Notion, writes the final ledger row, and sends the "posts live" email.
 
 State model:
-    queue file: ~/.hermes/zeus_publish_queue.jsonl   (one row per pending run)
-    archive file: ~/.hermes/zeus_publish_done.jsonl  (rows the watcher has resolved)
+    queue file: $HERMES_HOME/.hermes/zeus_publish_queue.jsonl   (one row per pending run)
+    archive file: $HERMES_HOME/.hermes/zeus_publish_done.jsonl  (rows the watcher has resolved)
+    Falls back to ~/.hermes/ when HERMES_HOME is unset (local dev).
 
 A row in the queue is the full ContentPiece payload (via to_dict / from_dict)
 plus enqueue timestamp + max_wait_until deadline. The watcher rewrites the
@@ -28,9 +29,10 @@ from pathlib import Path
 from typing import Optional
 
 from .content_types import ContentPiece
+from .paths import zeus_data_path
 
-QUEUE_PATH = Path(os.path.expanduser("~/.hermes/zeus_publish_queue.jsonl"))
-ARCHIVE_PATH = Path(os.path.expanduser("~/.hermes/zeus_publish_done.jsonl"))
+QUEUE_PATH = zeus_data_path("zeus_publish_queue.jsonl")
+ARCHIVE_PATH = zeus_data_path("zeus_publish_done.jsonl")
 
 
 def _piece_to_dict(piece: ContentPiece) -> dict:

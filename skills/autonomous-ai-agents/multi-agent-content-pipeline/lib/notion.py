@@ -28,6 +28,7 @@ from typing import Any, Optional
 import requests
 
 from .content_types import ContentPiece, ContentType
+from .paths import zeus_data_path
 
 log = logging.getLogger("zeus.notion")
 
@@ -105,7 +106,7 @@ def _render_post_links(p: ContentPiece) -> Optional[str]:
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"  # 2025-09-03 silently drops props on database ops
 
-CONFIG_PATH = Path(os.path.expanduser("~/.hermes/notion_ids.json"))
+CONFIG_PATH = zeus_data_path("notion_ids.json")
 
 NOTION_TEXT_LIMIT = 1900  # Notion's hard cap on rich_text content is 2000
 
