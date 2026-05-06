@@ -52,6 +52,13 @@ services:
     restart: unless-stopped
     stdin_open: false
     tty: false
+    # Load all secrets from .env.prod directly into the container env. The
+    # `--env-file` compose flag only fuels ${VAR} substitution; without this
+    # env_file directive only OPENROUTER_API_KEY (the one explicitly listed
+    # in the base compose file) reaches the agent. We need FAL_KEY,
+    # NOTION_API_KEY, PUBLER_*, HCLOUD_TOKEN, etc. to flow through too.
+    env_file:
+      - ./deploy/.env.prod
     # Bootstrap data volume (same as zeus-entrypoint.sh) then run a
     # heartbeat loop instead of an interactive Hermes REPL. Cron jobs
     # are registered via `docker exec zeus-agent setup_content_cron.py`
@@ -60,6 +67,12 @@ services:
     volumes:
       - zeus-hermes-data:/opt/data
       - ./deploy/zeus-prod-entrypoint.sh:/usr/local/bin/zeus-prod-entrypoint.sh:ro
+      # The base Dockerfile only ships skills/, plugins/, memory/, stack/,
+      # SOUL.md. Bind-mount scripts/ and core/ so setup_content_cron.py and
+      # the cron module are visible inside the container — and so `git pull`
+      # on the host updates them without an image rebuild.
+      - ./scripts:/opt/zeus/scripts:ro
+      - ./core:/opt/zeus/core:ro
     deploy:
       resources:
         limits:

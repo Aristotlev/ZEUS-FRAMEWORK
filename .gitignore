@@ -4,6 +4,8 @@ __pycache__/
 *.pyo
 .env
 .env.local
+.env.prod
+deploy/.env.prod
 *.egg-info/
 node_modules/
 .pytest_cache/
