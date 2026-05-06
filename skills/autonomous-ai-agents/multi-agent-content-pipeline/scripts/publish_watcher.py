@@ -243,10 +243,20 @@ def _final_status(states: dict[str, str], piece: ContentPiece, past_deadline: bo
     # with facebook+reddit skipped is fully posted, not partial.
     if confirmed and not failed and not pending:
         return "posted"
-    if past_deadline:
-        if confirmed:
-            return "partial"
-        return "failed"
+    # KEY FIX: don't archive a run as failed just because the deadline passed
+    # while platforms are still pending. Publer commonly publishes minutes-
+    # to-hours after our scheduling call (their feed-spacing logic), so a
+    # 12-min deadline + a pending platform used to dump healthy runs into
+    # done.jsonl with status=failed and no URLs. Now we only finalise when
+    # there's nothing left pending — past_deadline just enables the
+    # partial-vs-failed distinction at that point.
+    if not pending:
+        if past_deadline:
+            if confirmed:
+                return "partial"
+            return "failed"
+        # Nothing pending, nothing confirmed yet, deadline not reached:
+        # everything's still in flight on Publer's side.
     return "scheduled"  # still in flight
 
 

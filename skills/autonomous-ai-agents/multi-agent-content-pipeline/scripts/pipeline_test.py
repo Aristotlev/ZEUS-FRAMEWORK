@@ -955,7 +955,11 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
     # used to take 2-6 min and now happens out-of-process.
     if not wait_for_live:
         piece.status = "scheduled"
-        publish_enqueue(piece, max_wait_s=720)
+        # 24h queue lifetime: Publer often delays publishing by minutes-to-
+        # hours due to feed-spacing rules + per-platform throttles. The
+        # watcher's _final_status now only finalises when nothing's pending,
+        # so this is a hard cutoff, not a "give up early" knob.
+        publish_enqueue(piece, max_wait_s=86400)
         log.info(
             f"  publish outcome: status=scheduled, {len(attempted)} platforms enqueued for watcher "
             f"(run scripts/publish_watcher.py to resolve permalinks)"

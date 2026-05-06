@@ -118,8 +118,15 @@ def _piece_from_dict(d: dict) -> ContentPiece:
     return piece
 
 
-def enqueue(piece: ContentPiece, *, max_wait_s: int = 720) -> None:
-    """Append a pending-publish row for `piece`. Watcher resolves within max_wait_s."""
+def enqueue(piece: ContentPiece, *, max_wait_s: int = 86400) -> None:
+    """Append a pending-publish row for `piece`. Watcher resolves within max_wait_s.
+
+    Default 24h: Publer's actual publish-to-platform latency varies from
+    seconds to many minutes depending on feed-spacing config, content type,
+    and per-platform throttles. The watcher only finalises a run when nothing
+    is left pending, so this is a hard "give up entirely" cutoff, not a
+    "first poll where we might lose URLs" knob.
+    """
     QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
     deadline = (datetime.now(timezone.utc) + timedelta(seconds=max_wait_s)).isoformat()
     row = {
