@@ -118,20 +118,27 @@ def _post_id_from_job(job_id: str) -> str | None:
 
 
 def _find_publer_post_id(account_id: str, snippet: str) -> str | None:
-    """Same matching strategy as pipeline_test._publer_find_post_id."""
+    """Find the Publer post id by matching account + text snippet.
+
+    The text-based fallback ('any post for this account') was removed: it
+    cross-attributed URLs when two runs targeting the same account were both
+    in flight (run B's match returned run A's most-recent post as B's URL).
+    Now: snippet must actually match. If not, return None so the watcher
+    keeps polling until the real post lands.
+    """
+    if not snippet:
+        return None
     try:
         r = requests.get(f"{PUBLER_BASE}/posts?limit=30", headers=_publer_headers(), timeout=15)
         if r.status_code != 200:
             return None
         target = _norm(snippet)[:40]
-        posts = r.json().get("posts", [])
-        for p in posts:
+        if not target:
+            return None
+        for p in r.json().get("posts", []):
             if p.get("account_id") != account_id:
                 continue
-            if target and target in _norm(p.get("text") or ""):
-                return p.get("id")
-        for p in posts:
-            if p.get("account_id") == account_id:
+            if target in _norm(p.get("text") or ""):
                 return p.get("id")
     except Exception as e:
         log.warning(f"_find_publer_post_id error: {e}")
