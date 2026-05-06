@@ -222,7 +222,11 @@ def _resolve_one(piece: ContentPiece, post_id_cache: dict) -> dict:
             continue
         state = post.get("state")
         link = _extract_url(post)
-        if state == "posted" and link:
+        # Publer's API uses 'published' as the live-on-platform state. The
+        # original watcher only checked for 'posted', so every successful run
+        # silently went to 'pending' forever. Accept both — 'posted' may have
+        # been an older Publer naming.
+        if state in ("posted", "published") and link:
             piece.publer_job_ids[f"{platform}_url"] = link
             states[platform] = "live"
         elif state in ("error", "failed"):
