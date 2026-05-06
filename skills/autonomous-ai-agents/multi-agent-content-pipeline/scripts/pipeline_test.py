@@ -67,6 +67,13 @@ log = logging.getLogger("zeus-pipeline")
 
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
 ORCHESTRATOR_MODEL = "google/gemini-2.5-flash"
+# Picker model is intentionally different from the orchestrator: the picker
+# needs to know what's actually in today's news, not regurgitate famous stories
+# from its training cutoff. perplexity/sonar has built-in web search, costs
+# ~$0.0001 per query, and consistently returns current dated headlines.
+# Override via PICKER_MODEL env (e.g. `google/gemini-2.5-flash:online`,
+# `openai/gpt-5-mini:online`, or any `:online`-suffixed OpenRouter model).
+PICKER_MODEL = os.getenv("PICKER_MODEL", "perplexity/sonar")
 
 # Publer (only used with --publish)
 PUBLER_BASE = "https://app.publer.com/api/v1"
@@ -153,10 +160,15 @@ def _niche_clause() -> str:
 def auto_pick_topic(content_type: "ContentType") -> str:
     """Pick a current, niche-specific topic when no --topic is provided.
 
-    Used by --auto so host-side timers and `/trigger?auto=1`-style callers
-    can fire the pipeline without naming a story. Cheap gemini-flash call
-    (~$0.0001) — cost is logged but not added to the piece ledger since the
-    piece doesn't exist yet at this point.
+    Uses a web-search-enabled model (PICKER_MODEL, default perplexity/sonar)
+    so the topic comes from real headlines published in the last few days,
+    not the picker model's training cutoff. The chosen story is ALSO grounded
+    by injecting today's UTC date into the prompt — this makes the picker
+    refuse stale stories ("recent" without a date is interpreted relative to
+    training data, which is months/years behind real time).
+
+    Cost is logged but not added to the piece ledger since the piece doesn't
+    exist yet at this point.
     """
     if not NICHE:
         raise RuntimeError(
@@ -171,19 +183,31 @@ def auto_pick_topic(content_type: "ContentType") -> str:
         ContentType.SHORT_VIDEO: "high-energy 30-90s video story",
         ContentType.LONG_VIDEO: "explainer / breakdown video",
     }.get(content_type, "story")
+    today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
     prompt = (
-        f"You scout today's most newsworthy story for a {' / '.join(NICHE)} "
-        f"content desk. Suggest ONE specific, current headline-style topic "
-        f"suitable for a {type_hint}. "
-        f"Return ONLY the topic — no preamble, no quotes, no markdown, no trailing period. "
-        f"Concrete (specific tickers, names, numbers, or events), not generic. "
-        f"6-14 words."
+        f"Today is {today} (UTC). Search the live web RIGHT NOW for the most "
+        f"newsworthy {' / '.join(NICHE)} story published in the last 72 hours. "
+        f"Suggest ONE specific, current headline-style topic suitable for a {type_hint}. "
+        f"HARD REQUIREMENTS: must be from the last 72 hours, must reference a "
+        f"real story currently in circulation, NOT a famous historical event. "
+        f"If you cannot find a story dated within the last 72 hours, say "
+        f"\"NO_RECENT_STORY\" verbatim and nothing else. "
+        f"Otherwise return ONLY the topic — no preamble, no quotes, no markdown, "
+        f"no trailing period. Concrete (specific tickers, names, numbers, or "
+        f"events), not generic. 6-14 words."
     )
-    text, cost, source = openrouter_chat(prompt, max_tokens=80)
+    text, cost, source = openrouter_chat(prompt, max_tokens=120, model=PICKER_MODEL)
     topic = text.strip().strip('"').strip("'").splitlines()[0].rstrip(".").strip()
     if not topic:
         raise RuntimeError("auto-pick: LLM returned empty topic")
-    log.info(f"auto-pick: '{topic}' (picker cost ~${cost:.5f}, source={source})")
+    if topic.upper().startswith("NO_RECENT_STORY"):
+        raise RuntimeError(
+            f"auto-pick: picker model {PICKER_MODEL} found no story in the last "
+            f"72 hours for niche {NICHE}. Pass --topic explicitly, or check that "
+            f"PICKER_MODEL has live web search (e.g. perplexity/sonar, or any "
+            f"OpenRouter model with the :online suffix)."
+        )
+    log.info(f"auto-pick: '{topic}' (model={PICKER_MODEL}, cost ~${cost:.5f}, source={source})")
     return topic
 
 
@@ -191,18 +215,22 @@ def auto_pick_topic(content_type: "ContentType") -> str:
 # OpenRouter text generation
 # ---------------------------------------------------------------------------
 def openrouter_chat(
-    prompt: str, *, max_tokens: int = 800, json_mode: bool = False
+    prompt: str, *, max_tokens: int = 800, json_mode: bool = False, model: Optional[str] = None
 ) -> tuple[str, float, str]:
     """
     Call OpenRouter chat. Returns (text, cost_usd, source) where source is
     "actual" if OpenRouter returned `usage.cost` in the response (the standard
     behavior — this is the dollar amount they billed), or "estimate" if not
     present (rare). Callers feed this into piece.add_cost(..., source=source).
+
+    `model` defaults to ORCHESTRATOR_MODEL but auto_pick_topic overrides it
+    with PICKER_MODEL (web-search-enabled) so picker queries hit live news
+    instead of the orchestrator model's training cutoff.
     """
     if not OPENROUTER_KEY:
         raise RuntimeError("OPENROUTER_API_KEY not set")
     body = {
-        "model": ORCHESTRATOR_MODEL,
+        "model": model or ORCHESTRATOR_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0.7,
