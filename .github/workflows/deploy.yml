@@ -1,0 +1,63 @@
+name: Deploy to prod VM
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Set up SSH key + known_hosts
+        env:
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+          VM_HOST: ${{ secrets.VM_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$VM_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H -t ed25519,rsa "$VM_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Fast-forward /opt/zeus + restart zeus-agent
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes "$VM_USER@$VM_HOST" \
+            "GIT_SHA='$GIT_SHA' bash -se" <<'REMOTE'
+          set -euo pipefail
+          cd /opt/zeus
+          git fetch --quiet origin main
+          # Fast-forward only — fail loudly if VM has diverged so we can investigate
+          # rather than silently nuking on-VM state. The VM is meant to mirror main exactly.
+          git pull --ff-only origin main
+          HEAD_SHA=$(git rev-parse HEAD)
+          echo "VM HEAD is now $HEAD_SHA (expected $GIT_SHA)"
+          if [ "$HEAD_SHA" != "$GIT_SHA" ]; then
+            echo "WARN: HEAD mismatch — likely a newer push raced this run; deploy continues"
+          fi
+          # Restart zeus-agent: bind-mounts /opt/zeus, so this picks up the new code,
+          # restarts the watcher daemon, and resets the gateway's cron-ticker thread.
+          docker restart zeus-agent >/dev/null
+          # Wait for healthcheck to come back green (max ~60s).
+          for i in $(seq 1 12); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' zeus-agent 2>/dev/null || echo unknown)
+            if [ "$status" = "healthy" ]; then
+              echo "zeus-agent healthy after ${i} checks"
+              break
+            fi
+            sleep 5
+          done
+          docker ps --filter name=zeus-agent --format "{{.Names}} {{.Status}}"
+          REMOTE
