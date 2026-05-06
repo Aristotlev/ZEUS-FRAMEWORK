@@ -98,6 +98,18 @@ PUBLER_WORKSPACE = os.getenv("PUBLER_WORKSPACE_ID", "")
 # terminal-failed and the user gets the email so they can fix the root
 # cause manually.
 MAX_PUBLISH_RETRIES = 3
+
+# TikTok permalink-callback grace period. Publer marks TikTok posts as
+# state=published the moment TikTok accepts them, but the live URL only
+# arrives via TikTok's webhook → Publer, which can lag minutes-to-hours
+# (or never if the webhook drops). Without this, a healthy run sits in
+# the pending queue for the whole 24h deadline waiting on TikTok and the
+# user never gets the run-completion email. Once every other platform on
+# the run reaches a terminal state, we give TikTok this many seconds of
+# grace before dropping it (URL marker + state=dropped) so the email can
+# fire on time. The post is still live on TikTok — only the link tracking
+# is forfeited.
+TIKTOK_GRACE_SECONDS = 180
 PUBLER_ACCOUNTS = {
     "twitter": os.getenv("PUBLER_TWITTER_ID", ""),
     "instagram": os.getenv("PUBLER_INSTAGRAM_ID", ""),
@@ -301,9 +313,11 @@ def _final_status(states: dict[str, str], piece: ContentPiece, past_deadline: bo
     confirmed = [p for p, s in states.items() if s == "live"]
     failed = [p for p, s in states.items() if s == "failed"]
     pending = [p for p, s in states.items() if s == "pending"]
-    # 'skipped' platforms — never attempted (no Publer account ID) — are
+    # 'skipped' platforms — never attempted (no Publer account ID) — and
+    # 'dropped' platforms (TikTok grace expired without a permalink) are
     # ignored when judging status. A run that landed on twitter+linkedin
-    # with facebook+reddit skipped is fully posted, not partial.
+    # with facebook+reddit skipped is fully posted, not partial. Same for
+    # a run where TikTok went live but the URL never came back.
     if confirmed and not failed and not pending:
         return "posted"
     # KEY FIX: don't archive a run as failed just because the deadline passed
@@ -375,6 +389,47 @@ def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:
     return True
 
 
+def _maybe_drop_tiktok(piece: ContentPiece, states: dict[str, str], row: dict, post_id_cache: dict) -> None:
+    """If TikTok is the only platform still pending and every other one has
+    reached a terminal state, give TikTok TIKTOK_GRACE_SECONDS to surface a
+    permalink. Past that, drop it: write a PENDING url marker so the email +
+    Notion show "posted but URL not resolved" instead of "still scheduled",
+    and override states['tiktok']='dropped' so _final_status finalizes the
+    run. The post itself is already live on TikTok — only the link is lost.
+
+    Mutates `states` and `row` in place (the watcher persists row updates
+    back to the queue at the end of the pass).
+    """
+    if states.get("tiktok") != "pending":
+        return
+    others_terminal = all(
+        s in ("live", "failed", "skipped", "dropped")
+        for p, s in states.items()
+        if p != "tiktok"
+    )
+    if not others_terminal:
+        return
+    stamp = row.get("non_tiktok_done_at")
+    now = datetime.now(timezone.utc)
+    if not stamp:
+        row["non_tiktok_done_at"] = now.isoformat()
+        return
+    try:
+        elapsed = (now - datetime.fromisoformat(stamp)).total_seconds()
+    except ValueError:
+        row["non_tiktok_done_at"] = now.isoformat()
+        return
+    if elapsed < TIKTOK_GRACE_SECONDS:
+        return
+    post_id = post_id_cache.get(f"{piece.run_id}:tiktok") or piece.publer_job_ids.get("tiktok") or "unknown"
+    piece.publer_job_ids["tiktok_url"] = f"PENDING: post_id={post_id}"
+    states["tiktok"] = "dropped"
+    log.info(
+        f"  run={piece.run_id} dropping tiktok after {int(elapsed)}s grace "
+        f"(post live, permalink callback never arrived)"
+    )
+
+
 def _process_pass() -> tuple[int, int, int]:
     """Returns (resolved, advanced, still_pending)."""
     rows = publish_read_pending()
@@ -399,6 +454,7 @@ def _process_pass() -> tuple[int, int, int]:
         piece, meta = publish_hydrate(row)
         past_deadline = publish_is_past_deadline(row)
         states = _resolve_one(piece, post_id_cache)
+        _maybe_drop_tiktok(piece, states, row, post_id_cache)
         new_status = _final_status(states, piece, past_deadline)
         log.info(
             f"  run={piece.run_id} type={piece.content_type.value} "
