@@ -36,6 +36,10 @@ FROM_EMAIL_FALLBACK = os.getenv("ZEUS_NOTIFY_FROM_EMAIL", "")
 LOCAL_INBOX = Path(os.path.expanduser("~/.hermes/zeus_email_outbox"))
 
 
+def _notion_url(page_id: str) -> str:
+    return f"https://www.notion.so/{page_id.replace('-', '')}"
+
+
 def send_pipeline_summary(piece: ContentPiece, recipient: Optional[str] = None) -> str:
     """Send the post-run summary. Returns the backend that handled it ('resend'|'agentmail'|'smtp'|'file')."""
     to_addr = recipient or DEFAULT_RECIPIENT
@@ -270,7 +274,9 @@ def _text_body(p: ContentPiece) -> str:
     parts.append(_ledger_block_text())
     if p.notion_page_id:
         parts.append("")
-        parts.append(f"Notion archive page: {p.notion_page_id}")
+        parts.append(f"Notion archive page: {_notion_url(p.notion_page_id)}")
+    if p.notion_pipeline_page_id:
+        parts.append(f"Notion pipeline row:  {_notion_url(p.notion_pipeline_page_id)}")
     return "\n".join(parts)
 
 
@@ -291,8 +297,15 @@ def _html_body(p: ContentPiece) -> str:
             f"<tr><td>{k}</td><td style='text-align:right'>${v:.4f}</td><td style='font-size:11px'>{tag}</td></tr>"
         )
     cost_html = "".join(cost_rows)
+    notion_links = []
+    if p.notion_page_id:
+        url = _notion_url(p.notion_page_id)
+        notion_links.append(f'<li>Archive page: <a href="{url}">{url}</a></li>')
+    if p.notion_pipeline_page_id:
+        url = _notion_url(p.notion_pipeline_page_id)
+        notion_links.append(f'<li>Pipeline row: <a href="{url}">{url}</a></li>')
     notion_html = (
-        f"<p>Notion archive: <code>{p.notion_page_id}</code></p>" if p.notion_page_id else ""
+        f"<h3>Notion</h3><ul>{''.join(notion_links)}</ul>" if notion_links else ""
     )
     artifact_html = (
         f"<p><b>Local artifacts:</b> <code>{p.local_artifact_dir}</code></p>"

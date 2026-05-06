@@ -40,6 +40,33 @@ import requests
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent))
 
+
+def _load_env_file() -> None:
+    # Same as pipeline_test.py: when invoked from the agent's execute_code
+    # subprocess (cron path), the env doesn't propagate. Without this the
+    # watcher daemon spawns with no PUBLER_API_KEY → silent no-op → no
+    # permalinks resolved → no email. Stdlib parser since python-dotenv
+    # isn't in the system python.
+    for path in ("/opt/data/.env", os.path.expanduser("~/.hermes/.env"), os.path.expanduser("~/.env")):
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+        except OSError:
+            continue
+
+
+_load_env_file()
+
 from lib import (  # noqa: E402
     ContentPiece,
     LIMITS,

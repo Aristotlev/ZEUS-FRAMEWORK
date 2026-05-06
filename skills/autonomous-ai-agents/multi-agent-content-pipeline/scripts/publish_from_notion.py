@@ -44,6 +44,31 @@ SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent))
 sys.path.insert(0, str(SCRIPT_DIR))
 
+
+def _load_env_file() -> None:
+    # Same as pipeline_test.py / publish_watcher.py: the cron agent's
+    # execute_code subprocess has a clean env, so without this the script
+    # can't see NOTION_API_KEY / PUBLER_API_KEY etc. Stdlib parser.
+    for path in ("/opt/data/.env", os.path.expanduser("~/.hermes/.env"), os.path.expanduser("~/.env")):
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+        except OSError:
+            continue
+
+
+_load_env_file()
+
 from lib import (  # noqa: E402
     AudioMode,
     ContentPiece,
