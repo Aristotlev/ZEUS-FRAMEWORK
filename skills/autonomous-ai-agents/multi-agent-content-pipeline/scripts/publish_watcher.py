@@ -45,14 +45,12 @@ from lib import (  # noqa: E402
     LIMITS,
     NotionArchive,
     ledger_append,
-    needs_thread,
     publish_archive_done,
     publish_hydrate,
     publish_is_past_deadline,
     publish_read_pending,
     publish_rewrite_queue,
     send_pipeline_summary,
-    split_thread,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -89,8 +87,15 @@ def _norm(s: str) -> str:
 
 
 def _caption_for(piece: ContentPiece, platform: str) -> str:
+    """Mirror of pipeline_test.caption_for — same body, truncated cleanly."""
     limit = LIMITS.get(platform, len(piece.body))
-    return piece.body[:limit]
+    body = piece.body
+    if len(body) <= limit:
+        return body
+    cut = body.rfind(" ", 0, limit - 1)
+    if cut < limit // 2:
+        cut = limit - 1
+    return body[:cut].rstrip(" ,;:.") + "…"
 
 
 def _post_id_from_job(job_id: str) -> str | None:
@@ -213,12 +218,7 @@ def _resolve_one(piece: ContentPiece, post_id_cache: dict) -> dict:
             # doesn't yet reflect the post.
             post_id = _post_id_from_job(scheduled)
             if not post_id:
-                media_count = (1 if piece.video and piece.video.local_path
-                               else sum(1 for img in piece.images if img.local_path))
-                if platform == "twitter" and needs_thread(piece.body) and media_count <= 1:
-                    snippet = split_thread(piece.body)[0]
-                else:
-                    snippet = _caption_for(piece, platform) or piece.body
+                snippet = _caption_for(piece, platform) or piece.body
                 post_id = _find_publer_post_id(account, snippet)
             if post_id:
                 post_id_cache[cache_key] = post_id

@@ -56,10 +56,8 @@ from lib import (  # noqa: E402
     ledger_append,
     ledger_checkpoint,
     mix_audio_for_video,
-    needs_thread,
     publish_enqueue,
     send_pipeline_summary,
-    split_thread,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -337,13 +335,20 @@ def generate_article_text(topic: str, content_type: ContentType) -> tuple[str, s
 
 
 def caption_for(piece: ContentPiece, platform: str) -> str:
-    """Same article body for every platform, truncated to that platform's char limit.
+    """Same body for every platform — truncated to the platform's char cap.
 
-    User mandate: no per-platform LLM rewrites. Twitter's thread case is handled
-    separately in publish() via split_thread(piece.body).
+    User mandate: identical description on every platform. No per-platform LLM
+    rewrites, no Twitter threading. If the body exceeds the cap, cut at the
+    last word boundary and append an ellipsis so the truncation reads cleanly.
     """
     limit = LIMITS.get(platform, len(piece.body))
-    return piece.body[:limit]
+    body = piece.body
+    if len(body) <= limit:
+        return body
+    cut = body.rfind(" ", 0, limit - 1)
+    if cut < limit // 2:  # no reasonable word boundary — fall back to hard cut
+        cut = limit - 1
+    return body[:cut].rstrip(" ,;:.") + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -665,55 +670,6 @@ def _publer_schedule(provider: str, account_id: str, post_type: str, text: str, 
     return r.json()["job_id"]
 
 
-def _publer_schedule_thread(
-    account_id: str, tweets: list[str], media_ids: list[str],
-) -> str:
-    """Post a Twitter thread via Publer.
-
-    Carousel + thread (>1 media): distribute media 1:1 across tweets so each
-    tweet has its own visual — Twitter caps a single tweet at 4 media, and
-    stacking 4 carousel slides on tweet 1 wastes the rest of the thread.
-    Single-image: attach to tweet 1 only (no benefit from distributing).
-    """
-    # Publer interprets timezone-less ISO timestamps as UTC. Use UTC explicitly.
-    when = (datetime.now(timezone.utc) + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
-    thread_posts = []
-    distribute = len(media_ids) > 1
-    for i, tweet_text in enumerate(tweets):
-        if distribute and i < len(media_ids):
-            tweet_media = [{"id": media_ids[i]}]
-        elif not distribute and i == 0 and media_ids:
-            tweet_media = [{"id": media_ids[0]}]
-        else:
-            tweet_media = []
-        ttype = "photo" if tweet_media else "status"
-        post: dict = {
-            "networks": {
-                "twitter": {
-                    "type": ttype,
-                    "text": tweet_text,
-                }
-            },
-            "accounts": [{"id": account_id, "scheduled_at": when}],
-        }
-        if tweet_media:
-            post["networks"]["twitter"]["media"] = tweet_media
-        thread_posts.append(post)
-    payload = {
-        "bulk": {
-            "state": "scheduled",
-            "posts": thread_posts,
-            "thread": True,
-        }
-    }
-    r = requests.post(
-        f"{PUBLER_BASE}/posts/schedule", headers=_publer_headers(), json=payload, timeout=30,
-    )
-    if r.status_code != 200:
-        raise RuntimeError(f"Publer thread schedule failed {r.status_code}: {r.text[:300]}")
-    return r.json()["job_id"]
-
-
 def _publer_post_id_from_job(job_id: str) -> str | None:
     """Resolve a Publer schedule job_id to the actual post id.
 
@@ -816,12 +772,7 @@ def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 720, poll_int
         # match if Publer's job_status doesn't yet have the post (can race).
         post_id = _publer_post_id_from_job(job_id)
         if not post_id:
-            media_count = (1 if piece.video and piece.video.local_path
-                           else sum(1 for img in piece.images if img.local_path))
-            if platform == "twitter" and needs_thread(piece.body) and media_count <= 1:
-                snippet = split_thread(piece.body)[0]
-            else:
-                snippet = caption_for(piece, platform) or piece.body
+            snippet = caption_for(piece, platform) or piece.body
             post_id = _publer_find_post_id(account, snippet)
         if post_id:
             pending[platform] = post_id
@@ -916,18 +867,6 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
             log.info(f"  twitter: trimming {len(media_ids)} slides to 4 (Twitter cap)")
         else:
             platform_media = media_ids
-        # Multi-image posts (carousels) always ship as a single native gallery
-        # tweet — body truncates to 280 via caption_for. Threads are reserved
-        # for long-text/single-image cases where the body genuinely won't fit.
-        if platform == "twitter" and needs_thread(piece.body) and len(platform_media) <= 1:
-            tweets = split_thread(piece.body)
-            try:
-                jid = _publer_schedule_thread(account, tweets, platform_media)
-                log.info(f"  -> twitter thread ({len(tweets)} tweets, {len(platform_media)} media), job_id={jid}")
-                return platform, jid
-            except Exception as e:
-                log.error(f"  !! twitter thread failed: {e}")
-                return platform, f"FAILED: {e}"
         text = caption_for(piece, platform)
         if not text:
             log.warning(f"empty body for {platform} -- skipping")
