@@ -95,36 +95,20 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
 ORCHESTRATOR_MODEL = "google/gemini-2.5-flash"
 # Picker model is intentionally different from the orchestrator: the picker
 # needs to know what's actually in today's news, not regurgitate famous stories
-# from its training cutoff. Tested 4 candidates against finance/crypto/geo
-# niche on 2026-05-06:
-#   perplexity/sonar-pro           ✅ $0.006 — real recent headline (DEFAULT)
-#   google/gemini-2.5-flash:online ✅ $0.023 — works but 4× the cost
-#   openai/gpt-4o-mini:online      ✅ $0.021 — works but 3.5× the cost
-#   openai/gpt-5-mini:online       ❌ exhausts max_tokens on reasoning, empty
-#   perplexity/sonar               ❌ flaky, sometimes refuses search
-# Override via PICKER_MODEL env if perplexity-pro becomes unreliable.
-PICKER_MODEL = os.getenv("PICKER_MODEL", "perplexity/sonar-pro")
-
-# Phrases that indicate the model is confessing it can't actually search the
-# web rather than returning a real headline. We treat these as NO_RECENT_STORY
-# so the run fails loudly instead of publishing the model's own apology as
-# the topic. Matched case-insensitively against the start of the response.
-PICKER_REFUSAL_PHRASES = (
-    "i cannot search",
-    "i can't search",
-    "i don't have access",
-    "i do not have access",
-    "i'm sorry",
-    "i am sorry",
-    "i cannot verify",
-    "i can't verify",
-    "i cannot provide",
-    "i cannot find",
-    "no_recent_story",
-    "based on the search results provided",
-    "the search results provided are limited",
-    "as an ai",
-)
+# from its training cutoff.
+#
+# Re-tested 2026-05-06 under the NEW strict contract (must return JSON with
+# canonical source_url + ISO 8601 published_at + cite an allowlisted domain):
+#   google/gemini-2.5-flash:online ✅ $0.022 — real bloomberg/cnbc URLs, exact
+#                                              ISO timestamps, obeys allowlist
+#                                              (DEFAULT under strict regime)
+#   perplexity/sonar-pro           ❌ $0.006 — citations are reutersbest.com /
+#                                              YouTube / agency pages, not real
+#                                              news articles. Fails domain check
+#                                              and returns NO_RECENT_STORY.
+#   openai/gpt-4o-mini:online      ✅ $0.021 — works (alternate)
+# Override via PICKER_MODEL env if you want to swap.
+PICKER_MODEL = os.getenv("PICKER_MODEL", "google/gemini-2.5-flash:online")
 
 # Publer (only used with --publish)
 PUBLER_BASE = "https://app.publer.com/api/v1"
@@ -198,6 +182,206 @@ else:
     log.warning("niche: empty — content will be generic. Set content_pipeline.niche in ~/.hermes/config.yaml")
 
 
+# ---------------------------------------------------------------------------
+# Source allowlist — auto-pick MUST cite a story from one of these domains.
+# Without this, "in the last 12 hours" is unenforceable: the LLM can pick
+# anything and we have no way to verify provenance. With it: the picker
+# returns a JSON object {topic, source_url, published_at_utc}, we parse the
+# URL host and the timestamp, and we reject anything that doesn't match a
+# domain on the per-niche allowlist OR is older than the freshness window.
+#
+# Defaults below are user-curated (2026-05-06). Override per-niche via
+# `content_pipeline.sources` in ~/.hermes/config.yaml.
+# ---------------------------------------------------------------------------
+DEFAULT_SOURCES_BY_NICHE: dict[str, list[str]] = {
+    "finance": [
+        "finance.yahoo.com", "cnbc.com", "bloomberg.com",
+        "reuters.com", "ft.com", "wsj.com",
+    ],
+    "stocks": [
+        "finance.yahoo.com", "cnbc.com", "bloomberg.com",
+        "reuters.com", "wsj.com",
+    ],
+    "forex": [
+        "reuters.com", "bloomberg.com", "ft.com", "wsj.com",
+    ],
+    "crypto": [
+        "coindesk.com", "theblock.co", "decrypt.co", "cointelegraph.com",
+    ],
+    "geopolitics": [
+        "reuters.com", "aljazeera.com", "bbc.com", "economist.com", "ft.com",
+    ],
+    "ai_economy": [
+        "bloomberg.com", "wsj.com", "newsdigest.ai", "reuters.com",
+    ],
+}
+
+
+def _load_sources_override() -> dict[str, list[str]]:
+    """Read content_pipeline.sources from hermes config; return {} if missing.
+
+    Caller merges this on top of DEFAULT_SOURCES_BY_NICHE so YAML wins per-key
+    but absent entries fall back to defaults — that way a partial override
+    (e.g. only `crypto:`) doesn't wipe out other niches.
+    """
+    cfg_path = next((p for p in _candidate_config_paths() if p.exists()), None)
+    if cfg_path is None:
+        return {}
+    try:
+        import yaml  # type: ignore
+        with cfg_path.open() as fh:
+            cfg = yaml.safe_load(fh) or {}
+        srcs = (cfg.get("content_pipeline") or {}).get("sources") or {}
+        out: dict[str, list[str]] = {}
+        for niche, domains in srcs.items():
+            if isinstance(domains, str):
+                domains = [domains]
+            cleaned = [str(d).strip().lower().lstrip(".") for d in (domains or []) if str(d).strip()]
+            if cleaned:
+                out[str(niche).strip().lower()] = cleaned
+        return out
+    except Exception as e:
+        log.warning(f"sources: could not read override from {cfg_path} ({e}); using defaults")
+        return {}
+
+
+SOURCES_BY_NICHE: dict[str, list[str]] = {
+    **{k: list(v) for k, v in DEFAULT_SOURCES_BY_NICHE.items()},
+    **_load_sources_override(),
+}
+
+
+def _allowed_domains_for_niches(niches: list[str]) -> set[str]:
+    """Union of allowed domains across the configured niches (lowercased)."""
+    out: set[str] = set()
+    for n in niches:
+        for d in SOURCES_BY_NICHE.get(n.strip().lower(), []):
+            out.add(d.strip().lower().lstrip("."))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Niche rotation — every --auto run picks ONE niche from NICHE in round-robin
+# order, persisted to ~/.hermes/niche_rotation.json. Without rotation, the
+# picker faces the full niche list every time and "hottest story wins" — in
+# practice that means finance/geopolitics dominate and ai_economy / forex
+# rarely appear. Round-robin gives even coverage: with 6 niches and ~5 cron
+# slots/day, every niche gets a turn every ~1.2 days.
+# ---------------------------------------------------------------------------
+_NICHE_ROTATION_PATH = pathlib.Path(os.path.expanduser("~/.hermes/niche_rotation.json"))
+
+
+def _pick_next_niche() -> str:
+    """Read rotation state, return next niche, advance and persist. On any
+    error (missing file, corrupt JSON, niche list shrunk) reset to index 0
+    rather than crash — a run is more important than perfect ordering."""
+    if not NICHE:
+        raise RuntimeError("niche rotation: NICHE list is empty")
+    idx = 0
+    try:
+        with _NICHE_ROTATION_PATH.open() as fh:
+            state = json.load(fh)
+        idx = int(state.get("index", 0))
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, OSError, TypeError):
+        idx = 0
+    chosen = NICHE[idx % len(NICHE)]
+    next_idx = (idx + 1) % (len(NICHE) * 1000)  # cap so the int doesn't grow unboundedly
+    try:
+        _NICHE_ROTATION_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _NICHE_ROTATION_PATH.open("w") as fh:
+            json.dump(
+                {
+                    "index": next_idx,
+                    "last_niche": chosen,
+                    "advanced_at": datetime.now(timezone.utc).isoformat(),
+                    "configured_niches": list(NICHE),
+                },
+                fh,
+                indent=2,
+            )
+    except OSError as e:
+        log.warning(
+            f"niche rotation: could not persist state to {_NICHE_ROTATION_PATH} "
+            f"({e}) — next run may repeat this niche"
+        )
+    return chosen
+
+
+def _url_host(url: str) -> str:
+    """Lowercased hostname for `url`, or '' if unparseable / scheme-less."""
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url.strip())
+        if parsed.scheme not in ("http", "https"):
+            return ""
+        return (parsed.hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _host_in_allowlist(host: str, allowed: set[str]) -> bool:
+    """True if `host` exactly matches an allowed domain or is a subdomain of one."""
+    h = host.lower().lstrip(".")
+    if h.startswith("www."):
+        h = h[4:]
+    for d in allowed:
+        d = d.lower().lstrip(".")
+        if not d:
+            continue
+        if h == d or h.endswith("." + d):
+            return True
+    return False
+
+
+def _parse_iso8601_utc(s: str) -> Optional[datetime]:
+    """Parse ISO-8601-ish timestamps (handles trailing Z, naive→UTC). Returns
+    None on failure rather than raising — callers reject with a clear log."""
+    if not s or not isinstance(s, str):
+        return None
+    s = s.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _extract_json_object(text: str) -> Optional[dict]:
+    """Defensively pull a JSON object out of `text`. Handles ```json fences,
+    leading prose ('Here is the result:'), and trailing citation blocks."""
+    if not text:
+        return None
+    s = text.strip()
+    # Strip fenced code blocks
+    if s.startswith("```"):
+        s = s.lstrip("`")
+        if s.lower().startswith("json"):
+            s = s[4:]
+        s = s.strip()
+        # remove a closing fence if present
+        if s.endswith("```"):
+            s = s[:-3].strip()
+    try:
+        v = json.loads(s)
+        return v if isinstance(v, dict) else None
+    except json.JSONDecodeError:
+        pass
+    # Fall back to substring between the first { and last }
+    start = s.find("{")
+    end = s.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            v = json.loads(s[start:end + 1])
+            return v if isinstance(v, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
 def _niche_clause() -> str:
     if not NICHE:
         return ""
@@ -211,17 +395,24 @@ def _niche_clause() -> str:
 def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
     """Pick a current, niche-specific topic when no --topic is provided.
 
-    Uses a web-search-enabled model (PICKER_MODEL, default perplexity/sonar)
-    so the topic comes from real headlines published in the last few days,
-    not the picker model's training cutoff. The chosen story is ALSO grounded
-    by injecting today's UTC date into the prompt — this makes the picker
-    refuse stale stories ("recent" without a date is interpreted relative to
-    training data, which is months/years behind real time).
+    Strict provenance contract (added 2026-05-06): the picker MUST return a
+    JSON object with `topic`, `source_url`, and `published_at_utc`. We then
+    programmatically verify (a) the URL host is on the per-niche allowlist
+    and (b) the publish timestamp is within the freshness window. Anything
+    else is rejected — this is the only way "from headlines in the last 12h"
+    becomes enforceable instead of a wish in the prompt.
 
-    Returns (topic, cost_usd, cost_source). The cost is non-trivial
-    (perplexity/sonar-pro web search billed per call) so the caller must hand
-    it into run() so it lands on the piece's cost_breakdown — otherwise every
-    --auto run silently underreports its real spend.
+    Niche scope: every run uses exactly ONE niche from the configured list,
+    chosen by round-robin rotation (see _pick_next_niche). This guarantees
+    even coverage across all configured niches instead of letting the picker
+    always pick whichever has the loudest headline.
+
+    Freshness fallback: try 12h first; if no valid story is found, retry once
+    with a 24h window (logged loudly). If both fail, raise — better to skip
+    a slot than publish stale or unsourced content.
+
+    Returns (topic, cost_usd, cost_source). Cost is the sum of all picker
+    calls made (initial + optional retry).
     """
     if not NICHE:
         raise RuntimeError(
@@ -229,6 +420,23 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
             "~/.hermes/config.yaml (e.g. [finance, crypto, geopolitics]) "
             "or pass --topic explicitly."
         )
+
+    active_niche = _pick_next_niche()
+    log.info(
+        f"auto-pick: rotation → '{active_niche}' "
+        f"(rotation advanced; next slot will pick a different niche)"
+    )
+    active_niches = [active_niche]
+    allowed = _allowed_domains_for_niches(active_niches)
+    if not allowed:
+        raise RuntimeError(
+            f"auto-pick: no source allowlist configured for niche "
+            f"{active_niche!r}. Add it to DEFAULT_SOURCES_BY_NICHE or "
+            f"content_pipeline.sources in ~/.hermes/config.yaml — refusing to "
+            f"run without provenance enforcement (would publish unverified "
+            f"content)."
+        )
+
     type_hint = {
         ContentType.ARTICLE: "punchy article (one angle, one strong take)",
         ContentType.LONG_ARTICLE: "deep-dive analysis (multi-angle, data-rich)",
@@ -236,40 +444,147 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
         ContentType.SHORT_VIDEO: "high-energy 30-90s video story",
         ContentType.LONG_VIDEO: "explainer / breakdown video",
     }.get(content_type, "story")
-    today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
-    prompt = (
-        f"Today is {today} (UTC). Search the live web RIGHT NOW for the most "
-        f"newsworthy {' / '.join(NICHE)} story published in the last 12 hours. "
-        f"Suggest ONE specific, current headline-style topic suitable for a {type_hint}. "
-        f"HARD REQUIREMENTS: must be from the last 12 hours, must reference a "
-        f"real story currently in circulation, NOT a famous historical event. "
-        f"If you cannot find a story dated within the last 12 hours, say "
-        f"\"NO_RECENT_STORY\" verbatim and nothing else. "
-        f"Otherwise return ONLY the topic — no preamble, no quotes, no markdown, "
-        f"no trailing period. Concrete (specific tickers, names, numbers, or "
-        f"events), not generic. 6-14 words."
-    )
-    text, cost, source = openrouter_chat(prompt, max_tokens=120, model=PICKER_MODEL)
-    topic_raw = text.strip().strip('"').strip("'").splitlines()[0].rstrip(".").strip()
-    if not topic_raw:
-        raise RuntimeError("auto-pick: LLM returned empty topic")
-    topic_lower = topic_raw.lower()
-    looks_like_refusal = (
-        any(topic_lower.startswith(p) for p in PICKER_REFUSAL_PHRASES)
-        or len(topic_raw.split()) > 25  # legit topics are 6-14 words; a 25+
-                                        # word "topic" is almost always an
-                                        # apology paragraph
-    )
-    if looks_like_refusal:
-        raise RuntimeError(
-            f"auto-pick: picker model {PICKER_MODEL} could not find a real "
-            f"story in the last 12 hours for niche {NICHE} "
-            f"(returned: {topic_raw[:120]!r}). Pass --topic explicitly, or set "
-            f"PICKER_MODEL to a model with reliable web search "
-            f"(openai/gpt-5-mini:online, perplexity/sonar-pro, etc.)."
+
+    total_cost = 0.0
+    cost_source = "actual"
+    last_failure = ""
+
+    for window_hours in (12, 24):
+        topic, url, published, cost, csource = _pick_with_constraints(
+            type_hint, allowed, window_hours, active_niches
         )
-    log.info(f"auto-pick: '{topic_raw}' (model={PICKER_MODEL}, cost ~${cost:.5f}, source={source})")
-    return topic_raw, cost, source
+        total_cost += cost
+        if csource == "estimate":
+            cost_source = "estimate"
+        if topic:
+            tag = "" if window_hours == 12 else f" [WIDENED {window_hours}h]"
+            log.info(
+                f"auto-pick{tag}: niche={active_niche} '{topic}' "
+                f"(model={PICKER_MODEL}, src={url}, published={published}, "
+                f"cost ~${total_cost:.5f}, source={cost_source})"
+            )
+            if window_hours > 12:
+                log.warning(
+                    f"auto-pick: 12h window had no qualifying story for niche "
+                    f"{active_niche!r} within allowlist {sorted(allowed)} — "
+                    f"widened to {window_hours}h. If this happens often, "
+                    f"consider expanding sources for this niche."
+                )
+            return topic, total_cost, cost_source
+        last_failure = f"window={window_hours}h: no qualifying story"
+
+    raise RuntimeError(
+        f"auto-pick: picker model {PICKER_MODEL} could not find a real story "
+        f"in the last 24h within source allowlist {sorted(allowed)} for niche "
+        f"{active_niche!r} ({last_failure}). Pass --topic explicitly, widen "
+        f"the allowlist, or set PICKER_MODEL to a different web-search model. "
+        f"(cost spent: ${total_cost:.5f})"
+    )
+
+
+def _pick_with_constraints(
+    type_hint: str, allowed: set[str], window_hours: int, active_niches: list[str]
+) -> tuple[str, str, str, float, str]:
+    """Single picker call constrained to `allowed` domains and `window_hours`
+    freshness. Returns (topic, source_url, published_at_iso, cost, cost_source).
+    Empty topic means the picker call failed validation — caller decides
+    whether to widen the window or give up. Validation failures log a warning
+    and return; only empty/unparseable picker responses are silent.
+    """
+    today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y at %H:%M UTC")
+    domain_list = ", ".join(sorted(allowed))
+    niche_str = " / ".join(active_niches)
+    prompt = (
+        f"You are a news picker. Today is {today}.\n\n"
+        f"Search the live web RIGHT NOW for the single most newsworthy "
+        f"{niche_str} story PUBLISHED IN THE LAST {window_hours} HOURS.\n\n"
+        f"HARD REQUIREMENTS:\n"
+        f"1. The story MUST be cited from one of these domains (no others): "
+        f"{domain_list}\n"
+        f"2. The story MUST have been published within the last {window_hours} "
+        f"hours from now ({today}). Not days, not weeks — hours.\n"
+        f"3. Output ONLY a JSON object — no preamble, no markdown fences, no "
+        f"commentary, no trailing prose.\n\n"
+        f"JSON schema:\n"
+        f"{{\n"
+        f'  "headline": "<exact published headline>",\n'
+        f'  "topic": "<6-14 word topic suitable for a {type_hint}, concrete: '
+        f'tickers/names/numbers, no dates, no quotes>",\n'
+        f'  "source_url": "<https://... full canonical URL of the source '
+        f'article on one of the allowed domains>",\n'
+        f'  "published_at_utc": "<ISO 8601 UTC timestamp like '
+        f'2026-05-06T14:30:00Z>"\n'
+        f"}}\n\n"
+        f"If no qualifying story exists in the last {window_hours} hours from "
+        f"the allowed domains, output exactly: "
+        f'{{"error": "NO_RECENT_STORY"}}'
+    )
+
+    # NOTE: not using json_mode=True here — perplexity/sonar-pro rejects
+    # `response_format: json_object`, accepting only text/json_schema/regex.
+    # The prompt is explicit and _extract_json_object defensively strips
+    # ```json fences and surrounding prose, so we get reliable JSON without
+    # coupling to a single picker model's API surface.
+    # max_tokens=900 because gemini frequently wraps in ```json fences and
+    # adds prose before the JSON; 500 truncated mid-object on long topics.
+    text, cost, csource = openrouter_chat(
+        prompt, max_tokens=900, model=PICKER_MODEL
+    )
+    data = _extract_json_object(text)
+    if data is None:
+        log.warning(
+            f"auto-pick: picker returned non-JSON ({window_hours}h window): "
+            f"{text[:200]!r}"
+        )
+        return "", "", "", cost, csource
+
+    if "error" in data or "NO_RECENT_STORY" in str(data.get("error", "")).upper():
+        log.info(
+            f"auto-pick: picker reported no qualifying story "
+            f"({window_hours}h window, error={data.get('error')!r})"
+        )
+        return "", "", "", cost, csource
+
+    topic = str(data.get("topic", "")).strip().strip('"').strip("'").rstrip(".")
+    url = str(data.get("source_url", "")).strip()
+    published = str(data.get("published_at_utc", "")).strip()
+
+    if not topic:
+        log.warning(f"auto-pick: rejected — empty 'topic' field in {data!r}")
+        return "", "", "", cost, csource
+    if len(topic.split()) > 25:  # apology-paragraph guard preserved
+        log.warning(f"auto-pick: rejected — topic too long ({len(topic.split())} words): {topic[:120]!r}")
+        return "", "", "", cost, csource
+
+    host = _url_host(url)
+    if not host:
+        log.warning(f"auto-pick: rejected — unparseable source_url={url!r}")
+        return "", "", "", cost, csource
+    if not _host_in_allowlist(host, allowed):
+        log.warning(
+            f"auto-pick: rejected — host {host!r} not in allowlist "
+            f"{sorted(allowed)} (url={url!r})"
+        )
+        return "", "", "", cost, csource
+
+    pub_dt = _parse_iso8601_utc(published)
+    if pub_dt is None:
+        log.warning(
+            f"auto-pick: rejected — could not parse published_at_utc="
+            f"{published!r} for url={url!r}"
+        )
+        return "", "", "", cost, csource
+    age_hours = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 3600.0
+    # Half-hour grace for clock skew + small future-dated tolerance for
+    # publishers that timestamp ahead (rare, but happens with embargoed wires).
+    if age_hours < -1.0 or age_hours > window_hours + 0.5:
+        log.warning(
+            f"auto-pick: rejected — story is {age_hours:.1f}h old "
+            f"(limit {window_hours}h), published={published}, url={url}"
+        )
+        return "", "", "", cost, csource
+
+    return topic, url, published, cost, csource
 
 
 # ---------------------------------------------------------------------------
