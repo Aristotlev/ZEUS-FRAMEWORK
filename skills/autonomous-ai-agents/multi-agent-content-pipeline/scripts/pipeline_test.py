@@ -182,7 +182,7 @@ def _niche_clause() -> str:
     )
 
 
-def auto_pick_topic(content_type: "ContentType") -> str:
+def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
     """Pick a current, niche-specific topic when no --topic is provided.
 
     Uses a web-search-enabled model (PICKER_MODEL, default perplexity/sonar)
@@ -192,8 +192,10 @@ def auto_pick_topic(content_type: "ContentType") -> str:
     refuse stale stories ("recent" without a date is interpreted relative to
     training data, which is months/years behind real time).
 
-    Cost is logged but not added to the piece ledger since the piece doesn't
-    exist yet at this point.
+    Returns (topic, cost_usd, cost_source). The cost is non-trivial
+    (perplexity/sonar-pro web search billed per call) so the caller must hand
+    it into run() so it lands on the piece's cost_breakdown — otherwise every
+    --auto run silently underreports its real spend.
     """
     if not NICHE:
         raise RuntimeError(
@@ -241,7 +243,7 @@ def auto_pick_topic(content_type: "ContentType") -> str:
             f"(openai/gpt-5-mini:online, perplexity/sonar-pro, etc.)."
         )
     log.info(f"auto-pick: '{topic_raw}' (model={PICKER_MODEL}, cost ~${cost:.5f}, source={source})")
-    return topic_raw
+    return topic_raw, cost, source
 
 
 # ---------------------------------------------------------------------------
@@ -1023,6 +1025,7 @@ def run(
     audio_mode: AudioMode | None = None,
     wait_for_live: bool = False,
     quality: Optional[str] = None,
+    picker_cost: Optional[tuple[float, str]] = None,
 ) -> ContentPiece:
     log.info("=" * 60)
     log.info(f"  Zeus pipeline -- {content_type.value}: {topic}")
@@ -1032,6 +1035,14 @@ def run(
 
     # Build a stub piece up front so we can time text-gen onto it.
     piece = ContentPiece(content_type=content_type, title="", body="", topic=topic, audio_mode=audio_mode)
+
+    # Picker spend (perplexity/sonar-pro web search) happens before the piece
+    # exists, so main() captures it and hands it in here. Without this, every
+    # --auto run silently underreports its real spend by the picker's cost.
+    if picker_cost is not None:
+        pcost, psource = picker_cost
+        piece.add_cost(PICKER_MODEL, pcost, kind="text", source=psource)
+
     with _Phase(piece, "text_gen"):
         title, body, text_cost, text_source = generate_article_text(topic, content_type)
     piece.title = title
@@ -1211,7 +1222,12 @@ def main() -> int:
         audio_mode = None
 
     try:
-        topic = args.topic or auto_pick_topic(ContentType(args.type))
+        if args.topic:
+            topic = args.topic
+            picker_cost = None
+        else:
+            topic, _pcost, _psource = auto_pick_topic(ContentType(args.type))
+            picker_cost = (_pcost, _psource)
         run(
             ContentType(args.type),
             topic,
@@ -1221,6 +1237,7 @@ def main() -> int:
             audio_mode=audio_mode,
             wait_for_live=args.wait_for_live,
             quality=args.quality,
+            picker_cost=picker_cost,
         )
         return 0
     except Exception as e:  # surface clean failure rather than dumping a traceback into the user's terminal

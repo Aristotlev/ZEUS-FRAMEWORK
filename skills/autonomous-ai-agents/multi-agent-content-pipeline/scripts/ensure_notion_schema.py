@@ -100,6 +100,7 @@ WANTED_PROPERTIES = {
     "Local Artifact Dir": {"rich_text": {}},
     # Cost + media
     "Cost USD": {"number": {"format": "dollar"}},
+    "Cost Breakdown": {"rich_text": {}},
     "Models Used": {"multi_select": {}},
     "Image URLs": {"rich_text": {}},
     "Video URL": {"url": {}},

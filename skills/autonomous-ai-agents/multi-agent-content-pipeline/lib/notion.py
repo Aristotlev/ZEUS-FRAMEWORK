@@ -45,6 +45,24 @@ def _platforms_posted(p: ContentPiece) -> list[str]:
     return out
 
 
+def _format_cost_breakdown(p: ContentPiece) -> Optional[str]:
+    """Render piece.cost_breakdown as a human-readable per-model block for the
+    Notion archive. Each line is `<kind>:<model>: $0.0123 (actual|est)` so the
+    user can see at a glance where every dollar went. Returns None when the
+    piece has no recorded costs (skips the column entirely)."""
+    if not p.cost_breakdown:
+        return None
+    lines: list[str] = []
+    for key, usd in p.cost_breakdown.items():
+        src = p.cost_sources.get(key, "estimate")
+        flag = "actual" if src == "actual" else "est"
+        lines.append(f"{key}: ${usd:.4f} ({flag})")
+    lines.append(
+        f"— total ${p.total_cost:.4f} (actual ${p.actual_cost:.4f}, est ${p.estimated_cost:.4f})"
+    )
+    return "\n".join(lines)
+
+
 def _platforms_failed(p: ContentPiece) -> list[str]:
     """Subset of target_platforms that reported FAILED at any stage."""
     out: list[str] = []
@@ -255,6 +273,7 @@ class NotionArchive:
         wanted: dict[str, tuple[str, Any]] = {
             "Status": ("select", _humanize_status(piece.status)),
             "Cost USD": ("number", piece.total_cost),
+            "Cost Breakdown": ("rich_text", _trunc(_format_cost_breakdown(piece))),
             "Models Used": ("multi_select", piece.models_used),
             "Image URLs": ("rich_text", _trunc("\n".join(a.url for a in piece.images))),
             "Video URL": ("url", piece.video.url if piece.video else None),
@@ -441,6 +460,7 @@ class NotionArchive:
             "Posted At":    ("date", piece.posted_at.isoformat() if piece.posted_at else None),
             "Cost":         ("number", piece.total_cost),
             "Cost USD":     ("number", piece.total_cost),
+            "Cost Breakdown": ("rich_text", _trunc(_format_cost_breakdown(piece))),
             "Run ID":       ("rich_text", piece.run_id),
             "Job ID":       ("rich_text", "\n".join(
                 f"{k}: {v}" for k, v in piece.publer_job_ids.items()
@@ -550,6 +570,7 @@ class NotionArchive:
                     "Description": ("rich_text", _trunc(p.body)),
                     "Created At": ("date", p.created_at.isoformat()),
                     "Cost USD": ("number", p.total_cost),
+                    "Cost Breakdown": ("rich_text", _trunc(_format_cost_breakdown(p))),
                     "Models Used": ("multi_select", p.models_used),
                     "Image URLs": ("rich_text", _trunc("\n".join(a.url for a in p.images))),
                     "Video URL": ("url", p.video.url if p.video else None),
