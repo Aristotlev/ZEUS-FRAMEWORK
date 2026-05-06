@@ -124,10 +124,15 @@ def _build_jobs(niche: List[str]):
     article_slot = (
         f"Generate and publish ONE long-form {phrase} article on the most "
         f"newsworthy story from the past 4-6h. Skip stories already covered "
-        f"today (check the Notion archive). Write 1200-2000 words. Generate "
-        f"a 16:9 header image. Publish NOW to all configured Publer "
-        f"platforms (don't schedule for later). Archive to Notion. "
-        f"Be decisive — no questions, no back-and-forth."
+        f"today (check the Notion archive). Invoke the proper artifact-first "
+        f"pipeline via execute_code: "
+        f"`python skills/autonomous-ai-agents/multi-agent-content-pipeline/"
+        f"scripts/pipeline_test.py --type long_article --auto --publish` so "
+        f"the cost ledger (picker + orchestrator + fal image), Notion "
+        f"archive, and crash-recovery flow all run. The script handles topic "
+        f"selection from current headlines, image generation, Notion archive, "
+        f"and Publer publishing — do NOT draft, generate, or publish in your "
+        f"own context. Be decisive — no questions."
         + common_outro
     )
 
