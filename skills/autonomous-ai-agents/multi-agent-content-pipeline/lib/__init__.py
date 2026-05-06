@@ -21,6 +21,9 @@ from .notion import NotionArchive, extract_id_from_url
 from .platforms import (
     LIMITS,
     READ_MORE_TRIGGER,
+    TWITTER_THREAD_TRIGGER,
+    needs_thread,
+    split_thread,
     validate_lengths,
     meets_read_more,
 )
@@ -66,6 +69,9 @@ __all__ = [
     "extract_id_from_url",
     "LIMITS",
     "READ_MORE_TRIGGER",
+    "TWITTER_THREAD_TRIGGER",
+    "needs_thread",
+    "split_thread",
     "validate_lengths",
     "meets_read_more",
     "ledger_append",
