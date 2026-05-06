@@ -99,9 +99,25 @@ IMAGE_SPECS = {
 # Without this the LLM produces generic copy regardless of what the user's
 # pipeline is actually about (whatever niche/subcategories you've configured).
 # ---------------------------------------------------------------------------
+def _candidate_config_paths() -> list[pathlib.Path]:
+    """Where to look for hermes config, in priority order.
+
+    HERMES_HOME first (set in containerised/prod deploys, points at the live
+    config the gateway is actually using), then the conventional dev path
+    `~/.hermes/config.yaml`. Without HERMES_HOME-awareness, prod runs invoked
+    via `docker exec` saw an empty niche regardless of the configured value.
+    """
+    paths: list[pathlib.Path] = []
+    hermes_home = os.environ.get("HERMES_HOME")
+    if hermes_home:
+        paths.append(pathlib.Path(hermes_home) / "config.yaml")
+    paths.append(pathlib.Path(os.path.expanduser("~/.hermes/config.yaml")))
+    return paths
+
+
 def _load_niche() -> list[str]:
-    cfg_path = pathlib.Path(os.path.expanduser("~/.hermes/config.yaml"))
-    if not cfg_path.exists():
+    cfg_path = next((p for p in _candidate_config_paths() if p.exists()), None)
+    if cfg_path is None:
         return []
     try:
         import yaml  # type: ignore

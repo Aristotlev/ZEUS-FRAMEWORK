@@ -23,6 +23,13 @@ DONE = HERMES_HOME / "zeus_publish_done.jsonl"
 HEARTBEAT = HERMES_HOME / ".heartbeat"
 TRIGGER_TOKEN = os.getenv("ZEUS_TRIGGER_TOKEN", "")
 ZEUS_CONTAINER = os.getenv("ZEUS_CONTAINER", "zeus-agent")
+# Pipeline modules live in the hermes venv (requests, pydantic, openai, ...).
+# A bare `python3` only sees the system site-packages and dies on `import requests`.
+ZEUS_AGENT_PYTHON = os.getenv("ZEUS_AGENT_PYTHON", "/opt/hermes/.venv/bin/python")
+# Run the trigger as the hermes user so $HOME resolves to HERMES_HOME and any
+# files written (logs, ledger, jobs.json) get the right ownership. Plain
+# `docker exec` defaults to root, which has historically poisoned cron/jobs.json.
+ZEUS_AGENT_USER = os.getenv("ZEUS_AGENT_USER", "hermes")
 
 app = FastAPI(title="Zeus Status")
 
@@ -199,8 +206,8 @@ def trigger(
     if topic and auto:
         raise HTTPException(400, "topic and auto are mutually exclusive")
     cmd = [
-        "docker", "exec", "-d", ZEUS_CONTAINER,
-        "python3",
+        "docker", "exec", "-d", "-u", ZEUS_AGENT_USER, ZEUS_CONTAINER,
+        ZEUS_AGENT_PYTHON,
         "/opt/zeus/skills/autonomous-ai-agents/multi-agent-content-pipeline/scripts/pipeline_test.py",
         "--type", content_type,
     ]

@@ -28,6 +28,13 @@ if [ "$(id -u)" = "0" ]; then
     if [ "$(stat -c %u "$HERMES_HOME" 2>/dev/null)" != "$actual_uid" ]; then
         chown -R hermes:hermes "$HERMES_HOME" 2>/dev/null || true
     fi
+    # Force-fix cron/ ownership every boot: setup_content_cron.py was historically
+    # invoked as root (via plain `docker exec` without `-u hermes`), leaving
+    # jobs.json root:600 and unreadable to the hermes-uid gateway → cron silently
+    # dead. Cheap to make idempotent.
+    if [ -d "$HERMES_HOME/cron" ]; then
+        chown -R hermes:hermes "$HERMES_HOME/cron" 2>/dev/null || true
+    fi
     exec gosu hermes "$0" "$@"
 fi
 
