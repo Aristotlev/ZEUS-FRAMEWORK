@@ -82,7 +82,14 @@ for var in FAL_KEY FISH_AUDIO_API_KEY ZEUS_FISH_VOICE_DEFAULT \
            PICKER_MODEL \
            ZEUS_NOTIFY_EMAIL ZEUS_NOTIFY_FROM_NAME ZEUS_NOTIFY_FROM_EMAIL; do
     val="${!var:-}"
-    if [ -n "$val" ] && ! grep -q "^${var}=" "$HERMES_HOME/.env"; then
+    [ -z "$val" ] && continue
+    if grep -q "^${var}=" "$HERMES_HOME/.env"; then
+        # Host env is authoritative — refresh existing entries so a
+        # `compose up` env change reaches cron's execute_code subprocess.
+        # Previous "set if missing" silently dropped updates.
+        esc=$(printf '%s' "$val" | sed -e 's/[\/&|]/\\&/g')
+        sed -i "s|^${var}=.*|${var}=${esc}|" "$HERMES_HOME/.env"
+    else
         echo "${var}=${val}" >> "$HERMES_HOME/.env"
     fi
 done
