@@ -43,6 +43,32 @@ import requests
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent))
 
+
+def _load_env_file() -> None:
+    # The cron agent shells out via execute_code, which spawns a clean subprocess
+    # that does NOT inherit the gateway's env — so OPENROUTER_API_KEY / FAL_KEY /
+    # NOTION_API_KEY / PUBLER_API_KEY come back missing and the script aborts at
+    # exit code 2. Stdlib parse, since python-dotenv is not in the system python.
+    for path in ("/opt/data/.env", os.path.expanduser("~/.hermes/.env"), os.path.expanduser("~/.env")):
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+        except OSError:
+            continue
+
+
+_load_env_file()
+
 from lib import (  # noqa: E402
     AudioMode,
     ContentPiece,
