@@ -228,13 +228,26 @@ class NotionArchive:
     def _get_db_schema(self) -> dict:
         if self._db_schema is not None:
             return self._db_schema
-        r = requests.get(
-            f"{NOTION_API}/databases/{self.archive_db_id}", headers=self.headers, timeout=15
-        )
-        r.raise_for_status()
-        self._db_schema = r.json().get("properties", {})
-        log.info(f"  archive DB schema fields: {sorted(self._db_schema.keys())}")
-        return self._db_schema
+        # Notion's databases endpoint occasionally takes 15-30s under load.
+        # The original 15s timeout caused the recovery-pipeline path to fire
+        # on every run, costing 15s of wasted wall-clock and producing scary
+        # ERROR log lines. 45s + one retry handles the long tail.
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                r = requests.get(
+                    f"{NOTION_API}/databases/{self.archive_db_id}",
+                    headers=self.headers,
+                    timeout=45,
+                )
+                r.raise_for_status()
+                self._db_schema = r.json().get("properties", {})
+                log.info(f"  archive DB schema fields: {sorted(self._db_schema.keys())}")
+                return self._db_schema
+            except (requests.Timeout, requests.ConnectionError) as e:
+                last_exc = e
+                log.warning(f"  notion schema fetch retry {attempt + 1}/2 after {type(e).__name__}")
+        raise last_exc  # type: ignore[misc]
 
     def archive(self, piece: ContentPiece) -> str:
         """Create a Notion page in the archive DB. Returns new page id; also sets piece.notion_page_id."""

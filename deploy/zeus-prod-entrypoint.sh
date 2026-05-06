@@ -186,6 +186,20 @@ wait_for "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "PostgreSQL"
 
 echo "[zeus-prod] bootstrap complete — starting gateway (drives cron jobs)"
 
+# publish_watcher daemon — resolves Publer permalinks and fires the post-run
+# email once every platform is live. Without this, content runs land in Publer
+# fine, but Notion never gets patched with post URLs and no email arrives.
+# Used to start only via the publish-ready cron (06:30 UTC daily) — meaning a
+# container restart at 07:00 UTC would leave the daemon dead for ~23.5h.
+# Supervisor is idempotent (no-op if alive), so safe to invoke on every boot.
+WATCHER_SUPERVISOR="$ZEUS_DIR/skills/autonomous-ai-agents/multi-agent-content-pipeline/scripts/watcher_supervisor.sh"
+if [ -x "$WATCHER_SUPERVISOR" ]; then
+    echo "[zeus-prod] starting publish_watcher daemon"
+    bash "$WATCHER_SUPERVISOR" || echo "[zeus-prod] WARN: watcher_supervisor exit non-zero"
+else
+    echo "[zeus-prod] WARN: watcher_supervisor.sh not found at $WATCHER_SUPERVISOR"
+fi
+
 # Background heartbeat — proves the entrypoint is alive to /health and the
 # docker healthcheck. Touched every 60s; healthcheck tolerates 30min.
 ( while true; do touch "$HERMES_HOME/.heartbeat"; sleep 60; done ) &
