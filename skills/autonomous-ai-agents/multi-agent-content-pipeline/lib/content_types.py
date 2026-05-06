@@ -37,15 +37,14 @@ class AudioMode(str, Enum):
 
 
 PLATFORMS_BY_TYPE: dict[ContentType, list[str]] = {
-    ContentType.ARTICLE: ["twitter", "instagram", "linkedin", "tiktok"],
-    ContentType.LONG_ARTICLE: ["twitter", "instagram", "linkedin", "tiktok"],
-    # facebook + reddit are wired here for FUTURE Publer integration. If the
-    # corresponding PUBLER_FACEBOOK_ID / PUBLER_REDDIT_ID env vars are unset,
-    # `_schedule_one` skips them with a "no PUBLER_*_ID configured" warning
-    # and never sends a request. When the accounts get connected later, no
-    # code change is needed — set the env vars and they start posting.
+    ContentType.ARTICLE: ["twitter", "instagram", "linkedin", "tiktok", "facebook"],
+    ContentType.LONG_ARTICLE: ["twitter", "instagram", "linkedin", "tiktok", "facebook"],
+    # reddit is wired here for FUTURE Publer integration. If PUBLER_REDDIT_ID
+    # is unset, `_schedule_one` skips it with a "no PUBLER_*_ID configured"
+    # warning and never sends a request. When the account gets connected
+    # later, no code change is needed — set the env var and it starts posting.
     ContentType.CAROUSEL: ["twitter", "instagram", "linkedin", "tiktok", "facebook", "reddit"],
-    ContentType.SHORT_VIDEO: ["twitter", "instagram", "linkedin", "tiktok", "youtube"],
+    ContentType.SHORT_VIDEO: ["twitter", "instagram", "linkedin", "tiktok", "youtube", "facebook"],
     ContentType.LONG_VIDEO: ["youtube", "twitter", "linkedin", "reddit"],
 }
 
