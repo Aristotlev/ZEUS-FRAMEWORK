@@ -166,14 +166,25 @@ def _extract_url(post: dict) -> str | None:
 def _resolve_one(piece: ContentPiece, post_id_cache: dict) -> dict:
     """
     Try to advance every still-pending platform on `piece`. Returns
-    {platform: state} where state is 'live'|'failed'|'pending'.
+    {platform: state} where state is 'live'|'failed'|'skipped'|'pending'.
+
+    'skipped' = the platform is in target_platforms but was never actually
+    scheduled (typically because PUBLER_<PLATFORM>_ID is unset). _final_status
+    must NOT count skipped toward failure — the run is still healthy with
+    fewer platforms.
+
     Mutates piece.publer_job_ids in place: adds '<platform>_url' for confirmed
     posts (and uses 'FAILED:'/'PENDING:' prefixes consistent with the pipeline).
     """
     states: dict[str, str] = {}
     for platform in piece.target_platforms:
         scheduled = piece.publer_job_ids.get(platform, "")
-        if not scheduled or scheduled.startswith("FAILED"):
+        if not scheduled:
+            # Empty job_id means publish() never even attempted this platform
+            # — likely no PUBLER_<PLATFORM>_ID configured. Distinct from FAILED.
+            states[platform] = "skipped"
+            continue
+        if scheduled.startswith("FAILED"):
             states[platform] = "failed"
             continue
         already = piece.publer_job_ids.get(f"{platform}_url", "")
@@ -227,6 +238,9 @@ def _final_status(states: dict[str, str], piece: ContentPiece, past_deadline: bo
     confirmed = [p for p, s in states.items() if s == "live"]
     failed = [p for p, s in states.items() if s == "failed"]
     pending = [p for p, s in states.items() if s == "pending"]
+    # 'skipped' platforms — never attempted (no Publer account ID) — are
+    # ignored when judging status. A run that landed on twitter+linkedin
+    # with facebook+reddit skipped is fully posted, not partial.
     if confirmed and not failed and not pending:
         return "posted"
     if past_deadline:
@@ -273,14 +287,19 @@ def _process_pass() -> tuple[int, int, int]:
                     notion.update_status(piece)
             except Exception as e:
                 log.error(f"  notion update_status failed: {e}")
-            # Mirror the patch onto the per-publish pipeline row (multi-select
-            # Platforms, real Post URLs). No-op for runs that pre-date the
-            # pipeline-DB feature (notion_pipeline_page_id is None).
+            # Pipeline DB row: if pipeline_test.py created one earlier, patch
+            # it; otherwise create a fresh row now (so runs that pre-date the
+            # feature, or runs where NOTION_PIPELINE_DB_ID hadn't been set
+            # yet, still end up with a properly populated row including the
+            # newly-resolved Post URLs).
             try:
-                if notion is not None and getattr(piece, "notion_pipeline_page_id", None):
-                    notion.update_pipeline_row(piece)
+                if notion is not None:
+                    if getattr(piece, "notion_pipeline_page_id", None):
+                        notion.update_pipeline_row(piece)
+                    else:
+                        notion.write_pipeline_row(piece)
             except Exception as e:
-                log.error(f"  notion update_pipeline_row failed: {e}")
+                log.error(f"  notion pipeline-row sync failed: {e}")
             try:
                 ledger_append(piece)
             except Exception as e:
