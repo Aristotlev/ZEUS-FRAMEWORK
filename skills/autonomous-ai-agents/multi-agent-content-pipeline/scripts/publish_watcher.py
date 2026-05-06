@@ -213,7 +213,9 @@ def _resolve_one(piece: ContentPiece, post_id_cache: dict) -> dict:
             # doesn't yet reflect the post.
             post_id = _post_id_from_job(scheduled)
             if not post_id:
-                if platform == "twitter" and needs_thread(piece.body):
+                media_count = (1 if piece.video and piece.video.local_path
+                               else sum(1 for img in piece.images if img.local_path))
+                if platform == "twitter" and needs_thread(piece.body) and media_count <= 1:
                     snippet = split_thread(piece.body)[0]
                 else:
                     snippet = _caption_for(piece, platform) or piece.body

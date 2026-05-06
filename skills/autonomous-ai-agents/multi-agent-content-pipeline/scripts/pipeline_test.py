@@ -816,7 +816,9 @@ def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 720, poll_int
         # match if Publer's job_status doesn't yet have the post (can race).
         post_id = _publer_post_id_from_job(job_id)
         if not post_id:
-            if platform == "twitter" and needs_thread(piece.body):
+            media_count = (1 if piece.video and piece.video.local_path
+                           else sum(1 for img in piece.images if img.local_path))
+            if platform == "twitter" and needs_thread(piece.body) and media_count <= 1:
                 snippet = split_thread(piece.body)[0]
             else:
                 snippet = caption_for(piece, platform) or piece.body
@@ -914,7 +916,10 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
             log.info(f"  twitter: trimming {len(media_ids)} slides to 4 (Twitter cap)")
         else:
             platform_media = media_ids
-        if platform == "twitter" and needs_thread(piece.body):
+        # Multi-image posts (carousels) always ship as a single native gallery
+        # tweet — body truncates to 280 via caption_for. Threads are reserved
+        # for long-text/single-image cases where the body genuinely won't fit.
+        if platform == "twitter" and needs_thread(piece.body) and len(platform_media) <= 1:
             tweets = split_thread(piece.body)
             try:
                 jid = _publer_schedule_thread(account, tweets, platform_media)
