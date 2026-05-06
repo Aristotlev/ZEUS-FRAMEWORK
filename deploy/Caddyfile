@@ -9,6 +9,13 @@
 	email {$ACME_EMAIL}
 }
 
+# Redirect www → apex so www.{domain} doesn't 404 / fail TLS.
+# Caddy only provisions a cert for hosts with a site block, so this is the
+# simplest way to give www. a valid cert + sensible behavior.
+www.{$ZEUS_DOMAIN} {
+	redir https://{$ZEUS_DOMAIN}{uri}
+}
+
 {$ZEUS_DOMAIN} {
 	encode zstd gzip
 
