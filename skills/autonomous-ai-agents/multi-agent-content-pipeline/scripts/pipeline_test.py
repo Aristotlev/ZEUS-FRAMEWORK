@@ -1099,18 +1099,31 @@ def run(
     else:
         log.info("  skip publish (use --publish to post)")
 
-    # Always finalize: ledger row + email, regardless of upstream failures. The
-    # ledger row supersedes any checkpoint rows for this run_id, and the email
-    # surfaces the leaked-spend warning if status is failed/media_partial.
+    # Always finalize: ledger row regardless. Email is conditional —
+    # `scheduled` runs defer to publish_watcher so the email arrives WITH real
+    # post URLs, not job-id placeholders. Failures still email immediately so
+    # we don't silently lose runs that need attention.
     try:
         ledger_append(piece)
     except Exception as e:
         log.error(f"  ledger_append failed: {e}")
-    try:
-        backend = send_pipeline_summary(piece)
-        log.info(f"  notified -> backend={backend}")
-    except Exception as e:
-        log.error(f"  email failed: {e}")
+    defer_email = (
+        do_publish
+        and piece.status == "scheduled"
+        and publish_error is None
+        and media_error is None
+    )
+    if defer_email:
+        log.info(
+            "  email deferred to publish_watcher — will land when post URLs "
+            "resolve (cron: zeus-content-publish-watcher every 10 min)"
+        )
+    else:
+        try:
+            backend = send_pipeline_summary(piece)
+            log.info(f"  notified -> backend={backend}")
+        except Exception as e:
+            log.error(f"  email failed: {e}")
 
     log.info(
         f"DONE — total cost ${piece.total_cost:.4f}, models {piece.models_used}, status={piece.status}"
