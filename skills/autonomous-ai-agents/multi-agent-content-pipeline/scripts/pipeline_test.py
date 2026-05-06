@@ -69,11 +69,36 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
 ORCHESTRATOR_MODEL = "google/gemini-2.5-flash"
 # Picker model is intentionally different from the orchestrator: the picker
 # needs to know what's actually in today's news, not regurgitate famous stories
-# from its training cutoff. perplexity/sonar has built-in web search, costs
-# ~$0.0001 per query, and consistently returns current dated headlines.
-# Override via PICKER_MODEL env (e.g. `google/gemini-2.5-flash:online`,
-# `openai/gpt-5-mini:online`, or any `:online`-suffixed OpenRouter model).
-PICKER_MODEL = os.getenv("PICKER_MODEL", "perplexity/sonar")
+# from its training cutoff. The OpenRouter `:online` suffix forces Brave-backed
+# web search regardless of the underlying model, and is more reliable than
+# perplexity/sonar (which sometimes returns "I cannot search the live web"
+# without actually performing search). Costs ~$0.005-0.01/pick.
+# Override via PICKER_MODEL env. Known good values:
+#   openai/gpt-5-mini:online       (default, Brave search via OpenRouter)
+#   google/gemini-2.5-flash:online (cheaper, occasionally less crisp)
+#   perplexity/sonar-pro           (built-in search, more reliable than sonar)
+PICKER_MODEL = os.getenv("PICKER_MODEL", "openai/gpt-5-mini:online")
+
+# Phrases that indicate the model is confessing it can't actually search the
+# web rather than returning a real headline. We treat these as NO_RECENT_STORY
+# so the run fails loudly instead of publishing the model's own apology as
+# the topic. Matched case-insensitively against the start of the response.
+PICKER_REFUSAL_PHRASES = (
+    "i cannot search",
+    "i can't search",
+    "i don't have access",
+    "i do not have access",
+    "i'm sorry",
+    "i am sorry",
+    "i cannot verify",
+    "i can't verify",
+    "i cannot provide",
+    "i cannot find",
+    "no_recent_story",
+    "based on the search results provided",
+    "the search results provided are limited",
+    "as an ai",
+)
 
 # Publer (only used with --publish)
 PUBLER_BASE = "https://app.publer.com/api/v1"
@@ -197,18 +222,26 @@ def auto_pick_topic(content_type: "ContentType") -> str:
         f"events), not generic. 6-14 words."
     )
     text, cost, source = openrouter_chat(prompt, max_tokens=120, model=PICKER_MODEL)
-    topic = text.strip().strip('"').strip("'").splitlines()[0].rstrip(".").strip()
-    if not topic:
+    topic_raw = text.strip().strip('"').strip("'").splitlines()[0].rstrip(".").strip()
+    if not topic_raw:
         raise RuntimeError("auto-pick: LLM returned empty topic")
-    if topic.upper().startswith("NO_RECENT_STORY"):
+    topic_lower = topic_raw.lower()
+    looks_like_refusal = (
+        any(topic_lower.startswith(p) for p in PICKER_REFUSAL_PHRASES)
+        or len(topic_raw.split()) > 25  # legit topics are 6-14 words; a 25+
+                                        # word "topic" is almost always an
+                                        # apology paragraph
+    )
+    if looks_like_refusal:
         raise RuntimeError(
-            f"auto-pick: picker model {PICKER_MODEL} found no story in the last "
-            f"72 hours for niche {NICHE}. Pass --topic explicitly, or check that "
-            f"PICKER_MODEL has live web search (e.g. perplexity/sonar, or any "
-            f"OpenRouter model with the :online suffix)."
+            f"auto-pick: picker model {PICKER_MODEL} could not find a real "
+            f"story in the last 72 hours for niche {NICHE} "
+            f"(returned: {topic_raw[:120]!r}). Pass --topic explicitly, or set "
+            f"PICKER_MODEL to a model with reliable web search "
+            f"(openai/gpt-5-mini:online, perplexity/sonar-pro, etc.)."
         )
-    log.info(f"auto-pick: '{topic}' (model={PICKER_MODEL}, cost ~${cost:.5f}, source={source})")
-    return topic
+    log.info(f"auto-pick: '{topic_raw}' (model={PICKER_MODEL}, cost ~${cost:.5f}, source={source})")
+    return topic_raw
 
 
 # ---------------------------------------------------------------------------
