@@ -707,33 +707,37 @@ def _publer_schedule_thread(
 ) -> str:
     """Post a Twitter text thread via Publer.
 
-    Only invoked for single-image / no-media pieces whose body exceeds
-    TWITTER_THREAD_TRIGGER (480 chars). Multi-image carousels never reach
-    this path — they ship as a single native gallery tweet. Single image (or
-    none) attaches to tweet 1 only; remaining tweets are text-only chunks.
+    Publer's thread shape: ONE post object with the head tweet in
+    networks.twitter.text and the remaining tweets in accounts[0].comments[]
+    as {text: "..."} entries (in order). A previous version sent N posts with
+    a top-level `thread: True` flag, which Publer doesn't recognize — it
+    treated each as an independent scheduled tweet, producing 5 separate posts
+    instead of one chained thread (observed on long_article runs).
     """
     when = (datetime.now(timezone.utc) + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
-    thread_posts = []
-    for i, tweet_text in enumerate(tweets):
-        tweet_media = [{"id": media_ids[0]}] if i == 0 and media_ids else []
-        ttype = "photo" if tweet_media else "status"
-        post: dict = {
-            "networks": {
-                "twitter": {
-                    "type": ttype,
-                    "text": tweet_text,
-                }
-            },
-            "accounts": [{"id": account_id, "scheduled_at": when}],
-        }
-        if tweet_media:
-            post["networks"]["twitter"]["media"] = tweet_media
-        thread_posts.append(post)
+    head_text = tweets[0]
+    follow_ups = [{"text": t} for t in tweets[1:]]
+    head_network: dict = {
+        "type": "photo" if media_ids else "status",
+        "text": head_text,
+    }
+    if media_ids:
+        head_network["media"] = [{"id": media_ids[0]}]
     payload = {
         "bulk": {
             "state": "scheduled",
-            "posts": thread_posts,
-            "thread": True,
+            "posts": [
+                {
+                    "networks": {"twitter": head_network},
+                    "accounts": [
+                        {
+                            "id": account_id,
+                            "scheduled_at": when,
+                            "comments": follow_ups,
+                        }
+                    ],
+                }
+            ],
         }
     }
     r = requests.post(
