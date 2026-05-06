@@ -61,6 +61,16 @@ log = logging.getLogger("zeus-watcher")
 PUBLER_BASE = "https://app.publer.com/api/v1"
 PUBLER_KEY = os.getenv("PUBLER_API_KEY", "")
 PUBLER_WORKSPACE = os.getenv("PUBLER_WORKSPACE_ID", "")
+
+# Paid-but-not-posted retry cap. When every target platform fails at Publer
+# (e.g. all 4 hit "no available timeslot" — a misconfigured Publer schedule
+# or an expired auth token), the artifact is already paid for. Re-call
+# pipeline_test.publish() to re-upload + re-schedule per-platform. Retry
+# costs zero credits (no fal/LLM, just Publer API). Cap prevents an
+# infinite loop on permanent misconfig — after 3 attempts the run goes
+# terminal-failed and the user gets the email so they can fix the root
+# cause manually.
+MAX_PUBLISH_RETRIES = 3
 PUBLER_ACCOUNTS = {
     "twitter": os.getenv("PUBLER_TWITTER_ID", ""),
     "instagram": os.getenv("PUBLER_INSTAGRAM_ID", ""),
@@ -286,6 +296,58 @@ def _final_status(states: dict[str, str], piece: ContentPiece, past_deadline: bo
     return "scheduled"  # still in flight
 
 
+def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:
+    """Re-publish a fully-failed piece using its on-disk artifacts.
+
+    Returns True if the retry was attempted and the row should stay in the
+    queue (so the next watcher tick resolves the new per-platform jobs).
+    Returns False to fall through to the terminal-failed flow (notion +
+    ledger + email).
+
+    Skipped (returns False) when:
+      - retry_count is already at MAX_PUBLISH_RETRIES
+      - no images/video have a local_path (artifact gone — can't re-upload)
+      - pipeline_test.publish() raises (e.g. PUBLER_API_KEY suddenly unset)
+    """
+    attempts = int(meta.get("retry_count") or 0)
+    if attempts >= MAX_PUBLISH_RETRIES:
+        log.warning(
+            f"  run={piece.run_id} all platforms failed and retry cap "
+            f"({MAX_PUBLISH_RETRIES}) reached -- giving up"
+        )
+        return False
+    has_local = any(getattr(img, "local_path", None) for img in piece.images) or (
+        piece.video and getattr(piece.video, "local_path", None)
+    )
+    if not has_local:
+        log.warning(
+            f"  run={piece.run_id} all platforms failed but no local "
+            f"artifact to re-upload -- giving up"
+        )
+        return False
+    log.warning(
+        f"  run={piece.run_id} all platforms failed -- retry "
+        f"#{attempts + 1}/{MAX_PUBLISH_RETRIES} (reusing local media)"
+    )
+    # Clear stale per-platform job ids + URL markers so publish() schedules
+    # fresh jobs and the next watcher pass starts URL resolution from clean.
+    piece.publer_job_ids = {}
+    sys.path.insert(0, str(SCRIPT_DIR))
+    try:
+        import pipeline_test  # lazy: avoid circular cost at module load
+        pipeline_test.publish(piece)
+    except Exception as e:
+        log.error(f"  retry failed: {e} -- finalizing as failed")
+        return False
+    # Stamp the queue row so the next pass sees the new state. Bumping
+    # retry_count here (rather than in enqueue) keeps retries observable
+    # in zeus_publish_done.jsonl after the run eventually resolves.
+    row["piece"]["publer_job_ids"] = dict(piece.publer_job_ids)
+    row["piece"]["status"] = piece.status
+    row["retry_count"] = attempts + 1
+    return True
+
+
 def _process_pass() -> tuple[int, int, int]:
     """Returns (resolved, advanced, still_pending)."""
     rows = publish_read_pending()
@@ -315,6 +377,9 @@ def _process_pass() -> tuple[int, int, int]:
             f"  run={piece.run_id} type={piece.content_type.value} "
             f"states={states} -> {new_status}"
         )
+        if new_status == "failed" and _retry_publish(piece, row, meta):
+            remaining.append(row)
+            continue
         if new_status in ("posted", "partial", "failed"):
             piece.status = new_status
             piece.posted_at = datetime.now(timezone.utc)
