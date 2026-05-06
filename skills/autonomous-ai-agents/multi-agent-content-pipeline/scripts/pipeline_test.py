@@ -69,15 +69,15 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
 ORCHESTRATOR_MODEL = "google/gemini-2.5-flash"
 # Picker model is intentionally different from the orchestrator: the picker
 # needs to know what's actually in today's news, not regurgitate famous stories
-# from its training cutoff. The OpenRouter `:online` suffix forces Brave-backed
-# web search regardless of the underlying model, and is more reliable than
-# perplexity/sonar (which sometimes returns "I cannot search the live web"
-# without actually performing search). Costs ~$0.005-0.01/pick.
-# Override via PICKER_MODEL env. Known good values:
-#   openai/gpt-5-mini:online       (default, Brave search via OpenRouter)
-#   google/gemini-2.5-flash:online (cheaper, occasionally less crisp)
-#   perplexity/sonar-pro           (built-in search, more reliable than sonar)
-PICKER_MODEL = os.getenv("PICKER_MODEL", "openai/gpt-5-mini:online")
+# from its training cutoff. Tested 4 candidates against finance/crypto/geo
+# niche on 2026-05-06:
+#   perplexity/sonar-pro           ✅ $0.006 — real recent headline (DEFAULT)
+#   google/gemini-2.5-flash:online ✅ $0.023 — works but 4× the cost
+#   openai/gpt-4o-mini:online      ✅ $0.021 — works but 3.5× the cost
+#   openai/gpt-5-mini:online       ❌ exhausts max_tokens on reasoning, empty
+#   perplexity/sonar               ❌ flaky, sometimes refuses search
+# Override via PICKER_MODEL env if perplexity-pro becomes unreliable.
+PICKER_MODEL = os.getenv("PICKER_MODEL", "perplexity/sonar-pro")
 
 # Phrases that indicate the model is confessing it can't actually search the
 # web rather than returning a real headline. We treat these as NO_RECENT_STORY
