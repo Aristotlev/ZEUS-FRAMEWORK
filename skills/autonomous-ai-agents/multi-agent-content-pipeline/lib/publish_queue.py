@@ -58,6 +58,7 @@ def _piece_to_dict(piece: ContentPiece) -> dict:
         "posted_at": piece.posted_at.isoformat() if piece.posted_at else None,
         "publer_job_ids": dict(piece.publer_job_ids),
         "notion_page_id": piece.notion_page_id,
+        "notion_pipeline_page_id": piece.notion_pipeline_page_id,
         "run_id": piece.run_id,
         "local_artifact_dir": piece.local_artifact_dir,
         "phase_durations_ms": dict(piece.phase_durations_ms),
@@ -107,6 +108,7 @@ def _piece_from_dict(d: dict) -> ContentPiece:
             pass
     piece.publer_job_ids = dict(d.get("publer_job_ids") or {})
     piece.notion_page_id = d.get("notion_page_id")
+    piece.notion_pipeline_page_id = d.get("notion_pipeline_page_id")
     piece.run_id = d.get("run_id") or piece.run_id
     piece.local_artifact_dir = d.get("local_artifact_dir")
     piece.phase_durations_ms = dict(d.get("phase_durations_ms") or {})

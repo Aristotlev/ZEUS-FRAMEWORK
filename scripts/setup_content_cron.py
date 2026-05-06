@@ -172,6 +172,18 @@ def _build_jobs(niche: List[str]):
         "and summarize."
     )
 
+    publish_watcher = (
+        "Run the publish watcher via execute_code: "
+        "`python skills/autonomous-ai-agents/multi-agent-content-pipeline/"
+        "scripts/publish_watcher.py --once`. The script polls Publer for "
+        "live permalinks of every scheduled run still in the queue, patches "
+        "the Notion archive row AND the per-publish row in the Content "
+        "Pipeline DB with real Post URLs, then sends the final 'live' email. "
+        "If the queue is empty, exit silently. Otherwise email one line per "
+        "resolved run with the platform URLs. Do NOT do any drafting — the "
+        "watcher is purely a poll+patch loop."
+    )
+
     daily_crawl = (
         f"Build today's {phrase} content brief. Crawl the past 24h headlines "
         f"across the niche, pick the top 6 stories worth long-form coverage, "
@@ -207,6 +219,14 @@ def _build_jobs(niche: List[str]):
             # within ~10 min Zeus picks it up + ships through Publer.
             "schedule": "*/10 * * * *",
             "prompt": publish_ready,
+        },
+        {
+            "name": "zeus-content-publish-watcher",
+            # Every 10 min, offset by 5 min from the publish-ready job so we
+            # don't fight for Publer's rate limit. Picks up fresh schedules
+            # quickly and patches Notion + sends the "post is LIVE" email.
+            "schedule": "5,15,25,35,45,55 * * * *",
+            "prompt": publish_watcher,
         },
         {
             "name": "zeus-content-daily-crawl",

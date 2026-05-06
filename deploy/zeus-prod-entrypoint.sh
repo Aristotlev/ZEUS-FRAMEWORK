@@ -71,13 +71,15 @@ fi
 
 # Pass through the full content-pipeline env (fal, fish, notion, publer, etc)
 # so cron-fired pipeline_test.py can see them. Only adds keys not already set.
-for var in FAL_KEY FISH_AUDIO_API_KEY ZEUS_FISH_VOICE_DEFAULT NOTION_API_KEY \
+for var in FAL_KEY FISH_AUDIO_API_KEY ZEUS_FISH_VOICE_DEFAULT \
+           NOTION_API_KEY NOTION_ARCHIVE_DB_ID NOTION_PIPELINE_DB_ID ZEUS_NOTION_HUB_PAGE_ID \
            PUBLER_API_KEY PUBLER_WORKSPACE_ID \
            PUBLER_TWITTER_ID PUBLER_INSTAGRAM_ID PUBLER_LINKEDIN_ID \
            PUBLER_TIKTOK_ID PUBLER_YOUTUBE_ID PUBLER_FACEBOOK_ID PUBLER_REDDIT_ID \
-           RESEND_API_KEY AGENTMAIL_API_KEY \
+           RESEND_API_KEY AGENTMAIL_API_KEY AGENTMAIL_INBOX \
            HERMES_GMAIL_USER HERMES_GMAIL_APP_PASSWORD \
            HCLOUD_TOKEN \
+           PICKER_MODEL \
            ZEUS_NOTIFY_EMAIL ZEUS_NOTIFY_FROM_NAME ZEUS_NOTIFY_FROM_EMAIL; do
     val="${!var:-}"
     if [ -n "$val" ] && ! grep -q "^${var}=" "$HERMES_HOME/.env"; then

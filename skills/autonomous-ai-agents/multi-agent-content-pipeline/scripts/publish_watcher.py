@@ -273,6 +273,14 @@ def _process_pass() -> tuple[int, int, int]:
                     notion.update_status(piece)
             except Exception as e:
                 log.error(f"  notion update_status failed: {e}")
+            # Mirror the patch onto the per-publish pipeline row (multi-select
+            # Platforms, real Post URLs). No-op for runs that pre-date the
+            # pipeline-DB feature (notion_pipeline_page_id is None).
+            try:
+                if notion is not None and getattr(piece, "notion_pipeline_page_id", None):
+                    notion.update_pipeline_row(piece)
+            except Exception as e:
+                log.error(f"  notion update_pipeline_row failed: {e}")
             try:
                 ledger_append(piece)
             except Exception as e:

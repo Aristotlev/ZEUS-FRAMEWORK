@@ -79,6 +79,11 @@ class ContentPiece:
     posted_at: Optional[datetime] = None
     publer_job_ids: dict[str, str] = field(default_factory=dict)
     notion_page_id: Optional[str] = None
+    # Separate from notion_page_id (the archive row): this is the page id of
+    # the per-publish row in the "Content Pipeline" DB — one row per run with
+    # multi-select Platforms, Post URLs, etc. publish_watcher patches it as
+    # permalinks resolve.
+    notion_pipeline_page_id: Optional[str] = None
     # Stable id for the lifetime of this run. Lets the cost ledger correlate
     # checkpoint rows (written after each fal generation) with the final row,
     # so a run that crashed mid-pipeline still has its leaked spend on disk.

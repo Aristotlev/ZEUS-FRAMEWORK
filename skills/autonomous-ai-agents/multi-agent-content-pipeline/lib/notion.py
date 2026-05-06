@@ -162,6 +162,12 @@ class NotionArchive:
         self.hub_page_id = _hyphenate(hub) or hub
         self._archive_db_id: Optional[str] = _hyphenate(archive_db_id)
         self._db_schema: Optional[dict] = None
+        # Lazily resolved when write_pipeline_row is first called. Override
+        # via NOTION_PIPELINE_DB_ID env (faster than the title search).
+        self._pipeline_db_id: Optional[str] = _hyphenate(
+            os.getenv("NOTION_PIPELINE_DB_ID")
+        )
+        self._pipeline_db_schema: Optional[dict] = None
 
     @property
     def archive_db_id(self) -> str:
@@ -325,6 +331,185 @@ class NotionArchive:
             log.error(f"Notion update failed {r.status_code}: {r.text[:300]}")
             r.raise_for_status()
 
+    # -------------------------------------------------------------------
+    # Content Pipeline DB — one row per published run (multi-select Platforms)
+    #
+    # The archive DB collects everything (drafts, partial runs, failures).
+    # The pipeline DB is narrower: only published/scheduled rows, with the
+    # platforms it shipped to as a multi-select column, post URLs flattened
+    # into Post Links rich_text, and Run ID set so publish_watcher can patch
+    # the same row when permalinks resolve.
+    # -------------------------------------------------------------------
+    @property
+    def pipeline_db_id(self) -> Optional[str]:
+        """Return the Content Pipeline DB id — env override, then cache, then
+        title search under the hub. None if neither path resolves; callers
+        should treat that as 'feature disabled' (write_pipeline_row warns and
+        returns rather than failing the run)."""
+        if self._pipeline_db_id:
+            return self._pipeline_db_id
+        cfg = _load_config()
+        if cached := cfg.get("pipeline_db_id"):
+            self._pipeline_db_id = _hyphenate(cached) or cached
+            return self._pipeline_db_id
+        if self.hub_page_id:
+            self._pipeline_db_id = self._discover_pipeline_db()
+            if self._pipeline_db_id:
+                cfg["pipeline_db_id"] = self._pipeline_db_id
+                _save_config(cfg)
+        return self._pipeline_db_id
+
+    def _discover_pipeline_db(self) -> Optional[str]:
+        """Find a 'Content Pipeline'-named child database under the hub. Avoids
+        the archive DB by name. Returns None if not found — that's fine, it
+        just means the user hasn't set up the pipeline DB yet."""
+        try:
+            r = requests.get(
+                f"{NOTION_API}/blocks/{self.hub_page_id}/children?page_size=100",
+                headers=self.headers,
+                timeout=15,
+            )
+            r.raise_for_status()
+        except Exception as e:
+            log.warning(f"pipeline-db discovery failed: {e}")
+            return None
+        for b in r.json().get("results", []):
+            if b.get("type") != "child_database":
+                continue
+            title = ((b.get("child_database") or {}).get("title") or "").lower()
+            # Match "Content Pipeline" exactly; skip "Zeus Content Pipeline"
+            # variants only if no exact match found.
+            if title == "content pipeline":
+                log.info(f"discovered pipeline DB: 'Content Pipeline' -> {b['id']}")
+                return b["id"]
+        # Fallback: any DB whose title contains 'pipeline' but not 'archive'
+        for b in r.json().get("results", []):
+            if b.get("type") != "child_database":
+                continue
+            title = ((b.get("child_database") or {}).get("title") or "").lower()
+            if "pipeline" in title and "archive" not in title:
+                log.info(f"discovered pipeline DB by fuzzy match: {title!r} -> {b['id']}")
+                return b["id"]
+        return None
+
+    def _get_pipeline_db_schema(self) -> dict:
+        if self._pipeline_db_schema is not None:
+            return self._pipeline_db_schema
+        db_id = self.pipeline_db_id
+        if not db_id:
+            self._pipeline_db_schema = {}
+            return self._pipeline_db_schema
+        r = requests.get(
+            f"{NOTION_API}/databases/{db_id}", headers=self.headers, timeout=15
+        )
+        r.raise_for_status()
+        self._pipeline_db_schema = r.json().get("properties", {})
+        log.info(f"  pipeline DB schema fields: {sorted(self._pipeline_db_schema.keys())}")
+        return self._pipeline_db_schema
+
+    def write_pipeline_row(self, piece: ContentPiece) -> Optional[str]:
+        """Create one row in the Content Pipeline DB for this piece's publish.
+
+        Idempotent on retry only at the orchestrator level — this method
+        always creates a fresh row. publish_watcher patches the row in place
+        rather than re-creating, using piece.notion_pipeline_page_id.
+
+        Returns the new page id, or None if the pipeline DB isn't configured
+        (logs a warning but doesn't fail the run — pipeline DB is optional).
+        """
+        db_id = self.pipeline_db_id
+        if not db_id:
+            log.info(
+                "pipeline DB not configured (no NOTION_PIPELINE_DB_ID env, no "
+                "'Content Pipeline'-named child DB under hub) — skipping pipeline row"
+            )
+            return None
+        schema = self._get_pipeline_db_schema()
+        # Schema-aware: only send properties the user's DB actually has, with
+        # the right type. Mirrors archive() resilience.
+        first_image_url = piece.images[0].url if piece.images else None
+        post_links_text = _render_post_links(piece) or "\n".join(
+            f"{plat}: {jid}" for plat, jid in piece.publer_job_ids.items()
+            if not plat.endswith("_url")
+        ) or None
+        wanted: dict[str, tuple[str, Any]] = {
+            "Title":        ("title", piece.title or piece.topic),
+            "Name":         ("title", piece.title or piece.topic),
+            "Content Type": ("select", _content_type_label(piece.content_type)),
+            "Platforms":    ("multi_select", piece.target_platforms),
+            "Status":       ("select", _humanize_status(piece.status)),
+            "Posted At":    ("date", piece.posted_at.isoformat() if piece.posted_at else None),
+            "Cost":         ("number", piece.total_cost),
+            "Cost USD":     ("number", piece.total_cost),
+            "Run ID":       ("rich_text", piece.run_id),
+            "Job ID":       ("rich_text", "\n".join(
+                f"{k}: {v}" for k, v in piece.publer_job_ids.items()
+                if not k.endswith("_url")
+            ) or None),
+            "Post Links":   ("rich_text", _trunc(post_links_text)),
+            "Post URL":     ("url", _first_resolved_url(piece)),
+            "Image URL":    ("url", first_image_url),
+            "Media URL":    ("url", first_image_url or (piece.video.url if piece.video else None)),
+            "Full Text":    ("rich_text", _trunc(piece.body)),
+            "Model":        ("select", _primary_model_label(piece)),
+        }
+        props: dict = {}
+        for name, (kind, value) in wanted.items():
+            if name not in schema:
+                continue
+            if value is None or value == "" or value == []:
+                continue
+            schema_kind = schema[name].get("type")
+            if schema_kind != kind:
+                continue
+            props[name] = _format_property(kind, value)
+        if not props:
+            log.warning("pipeline row: no schema-matched properties to write — skipping")
+            return None
+        body = {"parent": {"database_id": db_id}, "properties": props}
+        r = requests.post(f"{NOTION_API}/pages", headers=self.headers, json=body, timeout=20)
+        if r.status_code >= 400:
+            log.error(f"pipeline row write failed {r.status_code}: {r.text[:400]}")
+            return None
+        page_id = r.json()["id"]
+        piece.notion_pipeline_page_id = page_id
+        log.info(f"  pipeline row written: {page_id}")
+        return page_id
+
+    def update_pipeline_row(self, piece: ContentPiece) -> None:
+        """Patch the pipeline row in place when permalinks land. No-op if no
+        pipeline row was written (e.g., the user hasn't enabled the pipeline DB)."""
+        if not piece.notion_pipeline_page_id:
+            return
+        schema = self._get_pipeline_db_schema()
+        first_image_url = piece.images[0].url if piece.images else None
+        wanted: dict[str, tuple[str, Any]] = {
+            "Status":     ("select", _humanize_status(piece.status)),
+            "Posted At":  ("date", piece.posted_at.isoformat() if piece.posted_at else None),
+            "Post Links": ("rich_text", _trunc(_render_post_links(piece))),
+            "Post URL":   ("url", _first_resolved_url(piece)),
+            "Image URL":  ("url", first_image_url),
+        }
+        props: dict = {}
+        for name, (kind, value) in wanted.items():
+            if name not in schema:
+                continue
+            if value is None or value == "" or value == []:
+                continue
+            if schema[name].get("type") != kind:
+                continue
+            props[name] = _format_property(kind, value)
+        if not props:
+            return
+        r = requests.patch(
+            f"{NOTION_API}/pages/{piece.notion_pipeline_page_id}",
+            headers=self.headers,
+            json={"properties": props},
+            timeout=15,
+        )
+        if r.status_code >= 400:
+            log.error(f"pipeline row update failed {r.status_code}: {r.text[:300]}")
+
     def _build_properties(
         self, p: ContentPiece, schema: dict, only_status: bool = False
     ) -> dict:
@@ -431,6 +616,28 @@ def _trunc(s: Optional[str], limit: int = NOTION_TEXT_LIMIT) -> Optional[str]:
 def _chunked(s: str, size: int):
     for i in range(0, len(s), size):
         yield s[i : i + size]
+
+
+def _first_resolved_url(p: ContentPiece) -> Optional[str]:
+    """Return the first real https permalink among any platform, for the
+    single-URL `Post URL` column. Pre-resolution this returns None and the
+    column stays empty until publish_watcher patches it."""
+    for plat in p.target_platforms:
+        url = p.publer_job_ids.get(f"{plat}_url", "")
+        if isinstance(url, str) and url.startswith("http"):
+            return url
+    return None
+
+
+def _primary_model_label(p: ContentPiece) -> Optional[str]:
+    """Best-effort short label for the Model select. Falls back to the most
+    expensive model in the breakdown so the row is informative even when the
+    DB schema's select options don't match every variant we use."""
+    if not p.cost_breakdown:
+        return None
+    top_key = max(p.cost_breakdown.items(), key=lambda kv: kv[1])[0]
+    # Strip the `text:` / `image:` prefix the breakdown uses internally.
+    return top_key.split(":", 1)[-1] if ":" in top_key else top_key
 
 
 def _format_property(kind: str, value: Any) -> dict:

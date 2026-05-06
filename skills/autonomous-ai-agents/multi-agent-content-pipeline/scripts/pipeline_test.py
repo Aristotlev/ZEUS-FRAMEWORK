@@ -1082,6 +1082,14 @@ def run(
             try:
                 publish(piece, wait_for_live=wait_for_live)
                 archive.update_status(piece)
+                # Per-publish row in the Content Pipeline DB — one row per run
+                # with multi-select Platforms, Run ID, and (eventually) live
+                # Post URLs. Skipped silently if the user hasn't set up a
+                # 'Content Pipeline' DB or NOTION_PIPELINE_DB_ID env.
+                try:
+                    archive.write_pipeline_row(piece)
+                except Exception as e:
+                    log.warning(f"  pipeline-row write failed (non-fatal): {e}")
                 log.info(f"  published -> jobs={piece.publer_job_ids} took={piece.phase_durations_ms.get('publish', 0)}ms")
             except Exception as e:
                 publish_error = e
