@@ -1,18 +1,43 @@
 """
 Platform character limits, "read more" thresholds, and Twitter thread splitting.
 
-User mandate (2026-05-06): every platform receives the SAME source body. On
-Twitter, single tweets cap at 480 chars (X Premium tier); bodies longer than
-480 are mechanically chunked into a text thread via split_thread (each tweet
-≤470 chars, room for " n/N" suffix). No per-platform LLM rewrites. Multi-image
-carousel posts on Twitter never thread — they ship as a single native gallery.
+User mandate: every platform receives the SAME source body, no per-platform LLM
+rewrites. On Twitter, bodies longer than the per-tweet limit are mechanically
+chunked into a text thread via split_thread; multi-image carousel posts on
+Twitter never thread — they ship as a single native gallery.
+
+Twitter tier (2026-05-06): account is on the FREE plan, so per-tweet hard limit
+is 280. Knobs below are env-overridable so we can flip to Premium later without
+a code change:
+  ZEUS_TWITTER_TIER=premium   (preset: limit=480, trigger=480, budget=470)
+  ZEUS_TWITTER_TIER=free      (preset, default: limit=280, trigger=280, budget=270)
+  ZEUS_TWITTER_LIMIT / ZEUS_TWITTER_THREAD_TRIGGER / ZEUS_TWITTER_TWEET_BUDGET
+    override individual values; useful when X changes the cap (e.g. Premium+).
+
+Budget reserves room for the " i/N" suffix (≤6 chars for N<100, ≤8 for N<1000),
+so every chunk + suffix lands safely under the per-tweet limit.
 """
 from __future__ import annotations
 
+import os
 import re
 
+_TIER = os.getenv("ZEUS_TWITTER_TIER", "free").strip().lower()
+_TIER_PRESETS: dict[str, tuple[int, int, int]] = {
+    # tier: (per-tweet limit, thread trigger, per-chunk budget)
+    "free": (280, 280, 270),
+    "premium": (480, 480, 470),
+}
+_preset_limit, _preset_trigger, _preset_budget = _TIER_PRESETS.get(
+    _TIER, _TIER_PRESETS["free"],
+)
+
+TWITTER_LIMIT = int(os.getenv("ZEUS_TWITTER_LIMIT", str(_preset_limit)))
+TWITTER_THREAD_TRIGGER = int(os.getenv("ZEUS_TWITTER_THREAD_TRIGGER", str(_preset_trigger)))
+TWITTER_TWEET_BUDGET = int(os.getenv("ZEUS_TWITTER_TWEET_BUDGET", str(_preset_budget)))
+
 LIMITS: dict[str, int] = {
-    "twitter": 480,
+    "twitter": TWITTER_LIMIT,
     "instagram": 2200,
     "linkedin": 3000,
     "tiktok": 2200,
@@ -30,9 +55,6 @@ READ_MORE_TRIGGER: dict[str, int] = {
     "reddit": 0,  # no truncation
 }
 
-TWITTER_THREAD_TRIGGER = 480
-TWITTER_TWEET_BUDGET = 470  # leave room for ' n/N' suffix on multi-tweet threads
-
 
 def needs_thread(text: str) -> bool:
     return len(text) > TWITTER_THREAD_TRIGGER
@@ -40,31 +62,56 @@ def needs_thread(text: str) -> bool:
 
 def split_thread(text: str, per_tweet_limit: int = TWITTER_TWEET_BUDGET) -> list[str]:
     """
-    Split text into a Twitter thread. Tries sentence boundaries first, falls
-    back to word wrap for over-long sentences. Suffixes ' i/N' to each tweet
-    when N > 1.
+    Split text into a Twitter thread at the most natural boundary that fits.
+
+    Boundary preference: paragraph (\\n\\n) > sentence (.!?…) > word > hard
+    char-split (last-resort, only for tokens longer than the limit, e.g. URLs).
+    Each chunk is ≤per_tweet_limit; " i/N" is suffixed when N>1, and the
+    caller-side budget reserves room for that suffix.
     """
     text = text.strip()
     if len(text) <= per_tweet_limit:
         return [text]
-    sentences = re.split(r"(?<=[.!?])\s+", text)
+
+    # 1. Build atomic units that each fit in one tweet. Try paragraph-sized
+    #    chunks first (preserves logical structure on long_articles); if a
+    #    paragraph is too big, drop to sentences; if a sentence is too big,
+    #    word-wrap as a last resort.
+    units: list[str] = []
+    for para in re.split(r"\n{2,}", text):
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) <= per_tweet_limit:
+            units.append(para)
+            continue
+        for sent in re.split(r"(?<=[.!?…])\s+", para):
+            sent = sent.strip()
+            if not sent:
+                continue
+            if len(sent) <= per_tweet_limit:
+                units.append(sent)
+            else:
+                units.extend(_word_wrap(sent, per_tweet_limit))
+
+    # 2. Greedy-pack units into tweets, joining with a single space. We never
+    #    split a unit across two tweets here — that already happened in step 1
+    #    when needed.
     tweets: list[str] = []
     current = ""
-    for sent in sentences:
-        if len(sent) > per_tweet_limit:
-            if current:
-                tweets.append(current.strip())
-                current = ""
-            tweets.extend(_word_wrap(sent, per_tweet_limit))
+    for unit in units:
+        if not current:
+            current = unit
             continue
-        candidate = f"{current} {sent}".strip() if current else sent
+        candidate = f"{current} {unit}"
         if len(candidate) <= per_tweet_limit:
             current = candidate
         else:
-            tweets.append(current.strip())
-            current = sent
+            tweets.append(current)
+            current = unit
     if current:
-        tweets.append(current.strip())
+        tweets.append(current)
+
     n = len(tweets)
     if n > 1:
         tweets = [f"{t} {i + 1}/{n}" for i, t in enumerate(tweets)]
