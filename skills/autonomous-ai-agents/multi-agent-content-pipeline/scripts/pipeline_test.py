@@ -239,11 +239,11 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
     today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
     prompt = (
         f"Today is {today} (UTC). Search the live web RIGHT NOW for the most "
-        f"newsworthy {' / '.join(NICHE)} story published in the last 72 hours. "
+        f"newsworthy {' / '.join(NICHE)} story published in the last 12 hours. "
         f"Suggest ONE specific, current headline-style topic suitable for a {type_hint}. "
-        f"HARD REQUIREMENTS: must be from the last 72 hours, must reference a "
+        f"HARD REQUIREMENTS: must be from the last 12 hours, must reference a "
         f"real story currently in circulation, NOT a famous historical event. "
-        f"If you cannot find a story dated within the last 72 hours, say "
+        f"If you cannot find a story dated within the last 12 hours, say "
         f"\"NO_RECENT_STORY\" verbatim and nothing else. "
         f"Otherwise return ONLY the topic — no preamble, no quotes, no markdown, "
         f"no trailing period. Concrete (specific tickers, names, numbers, or "
@@ -263,7 +263,7 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
     if looks_like_refusal:
         raise RuntimeError(
             f"auto-pick: picker model {PICKER_MODEL} could not find a real "
-            f"story in the last 72 hours for niche {NICHE} "
+            f"story in the last 12 hours for niche {NICHE} "
             f"(returned: {topic_raw[:120]!r}). Pass --topic explicitly, or set "
             f"PICKER_MODEL to a model with reliable web search "
             f"(openai/gpt-5-mini:online, perplexity/sonar-pro, etc.)."

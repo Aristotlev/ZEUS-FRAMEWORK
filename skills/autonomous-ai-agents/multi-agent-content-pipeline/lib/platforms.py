@@ -75,6 +75,21 @@ def _word_wrap(text: str, limit: int) -> list[str]:
     out: list[str] = []
     current = ""
     for word in text.split():
+        # A single token longer than the tweet limit (long URL, run-on
+        # hashtag, no-space pasted block) used to be appended whole, then
+        # Twitter would truncate it mid-word on display. Hard-split such
+        # tokens at limit boundaries before they hit the chunker.
+        if len(word) > limit:
+            if current:
+                out.append(current)
+                current = ""
+            for i in range(0, len(word), limit):
+                piece = word[i : i + limit]
+                if len(piece) == limit:
+                    out.append(piece)
+                else:
+                    current = piece
+            continue
         candidate = f"{current} {word}".strip() if current else word
         if len(candidate) <= limit:
             current = candidate
