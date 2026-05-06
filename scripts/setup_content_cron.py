@@ -8,19 +8,23 @@ Override per-run with ``--niche "a,b,c"``.
 Idempotent: removes any existing ``zeus-content-*`` jobs before recreating,
 so re-running this updates the prompts/schedules without duplicating.
 
-Creates these jobs:
-  1. zeus-content-article-slot   — every 4-6h: generate + post one long-form
-     article on the freshest story in your niche.
-     Fires at 04:00, 08:00, 12:00, 17:00, 21:00, 00:00 (server local time).
-  2. zeus-content-carousel-slot  — twice daily (00:30 / 12:30): one carousel.
-  3. zeus-content-notion-ideas   — every 30 min: pulls "New" rows from the
-     Notion Content Ideas DB through scripts/ingest_ideas.py, distills each
-     into a drafted piece in the archive DB. Auto-publishes drafts whose
-     "Auto Publish" checkbox is on (chains into job 4).
-  4. zeus-content-publish-ready  — every 10 min: ships every archive row
-     whose Status is "Ready to Publish" via scripts/publish_from_notion.py.
-  5. zeus-content-daily-crawl    — daily 06:00: crawl the day's top headlines
-     across the niche, build a content brief, queue stories for the day.
+Creates 5 cron jobs (publish_watcher runs as an in-memory daemon, not cron):
+  1. zeus-content-article-slot   — 6×/day: generate + post one long-form
+     article on the freshest story. Fires at 00,04,08,12,17,21 UTC.
+  2. zeus-content-carousel-slot  — 2×/day (00:30 / 12:30): one carousel.
+  3. zeus-content-notion-ideas   — 1×/day (06:15 UTC): pulls "New" rows
+     from the Notion Content Ideas DB and drafts them. Cron is a safety
+     net; for urgent ingestion run scripts/ingest_ideas.py --once on demand.
+  4. zeus-content-publish-ready  — 1×/day (06:30 UTC): ships archive rows
+     flagged "Ready to Publish" AND ensures the publish_watcher daemon is
+     alive (via watcher_supervisor.sh). Cron is a safety net for stuck
+     rows + post-container-restart daemon revival.
+  5. zeus-content-daily-crawl    — 1×/day (06:00 UTC): builds today's brief
+     into the Notion Content Ideas DB.
+
+The publish_watcher runs as a self-respawning daemon (started by
+watcher_supervisor.sh) — polls Publer in-memory every 30s for permalink
+resolution. Faster than the old every-10-min cron, zero agent overhead.
 
 Run from anywhere:
     python scripts/setup_content_cron.py
@@ -160,7 +164,9 @@ def _build_jobs(niche: List[str]):
         "Run the Content Ideas ingester. The script reads 'New' rows from "
         "the Notion Content Ideas DB, distills each (URL / YouTube / text) "
         "into a drafted archive page, and (when 'Auto Publish' is checked) "
-        "flips the archive row to 'Ready to Publish'.\n\n"
+        "flips the archive row to 'Ready to Publish'. Runs once a day — "
+        "manual idea entry isn't time-sensitive; on-demand invocation "
+        "(if you ever need it sooner) is faster than tightening this cron.\n\n"
         f"COMMAND (this is the entire task):\n"
         f"  python {PIPELINE}/ingest_ideas.py --once\n\n"
         "On exit 0 with no work done: exit silently (no email). On exit 0 "
@@ -169,25 +175,20 @@ def _build_jobs(niche: List[str]):
     )
 
     publish_ready = (
-        "Run the Notion-driven publisher. The script reads archive rows "
-        "whose Status is 'Ready to Publish', regenerates any missing media, "
-        "and ships per-platform via Publer with explicit scheduled_at "
-        "timestamps. publish_watcher resolves permalinks out-of-process.\n\n"
-        f"COMMAND (this is the entire task):\n"
+        "Daily safety-net for Notion rows the user flipped to 'Ready to "
+        "Publish' but that the on-demand publish path didn't catch. ALSO "
+        "ensures the publish_watcher daemon is alive (faster permalink "
+        "resolution than cron, and zero agent overhead for the 99% of "
+        "ticks that previously found nothing to do).\n\n"
+        f"COMMANDS (run both in order, this is the entire task):\n"
+        f"  bash {PIPELINE}/watcher_supervisor.sh\n"
         f"  python {PIPELINE}/publish_from_notion.py --once\n\n"
-        "On exit 0 with empty queue: exit silently. On exit 0 with "
-        "scheduled rows: report run_ids in one line."
-        + HARD_RULES
-    )
-
-    publish_watcher = (
-        "Run the publish watcher (poll Publer for live permalinks, patch "
-        "Notion + Content Pipeline DB with real Post URLs, send the final "
-        "'live' email via the unified email_notify path).\n\n"
-        f"COMMAND (this is the entire task):\n"
-        f"  python {PIPELINE}/publish_watcher.py --once\n\n"
-        "On empty queue: exit silently. On resolved runs: report one line "
-        "per run with platform URLs."
+        "watcher_supervisor.sh is idempotent — no-op if daemon alive, "
+        "respawns it if dead (it self-respawns on python crashes, so this "
+        "only matters after a container restart).\n\n"
+        "On exit 0 with empty Notion queue: report only the watcher status "
+        "(alive / restarted) in one line. On exit 0 with scheduled rows: "
+        "report watcher status + run_ids."
         + HARD_RULES
     )
 
@@ -222,25 +223,23 @@ def _build_jobs(niche: List[str]):
         },
         {
             "name": "zeus-content-notion-ideas",
-            # Every 30 min — the script no-ops on an empty queue, so
-            # frequent polling is cheap and means new rows compile quickly.
-            "schedule": "*/30 * * * *",
+            # Once a day at 06:15 UTC. Manual idea entry isn't time-
+            # sensitive; the previous every-30-min cadence ran the agent
+            # 48 times/day on an empty queue at $0.01-0.02/tick.
+            "schedule": "15 6 * * *",
             "prompt": notion_ideas,
         },
         {
             "name": "zeus-content-publish-ready",
-            # Every 10 min — Aris flips a Draft to "Ready to Publish" and
-            # within ~10 min Zeus picks it up + ships through Publer.
-            "schedule": "*/10 * * * *",
+            # Once a day at 06:30 UTC. Doubles as the watcher-daemon health
+            # check (supervisor.sh is idempotent — no-op if alive). Replaces
+            # the every-10-min agent cron + the every-10-min watcher cron;
+            # the watcher now runs as a respawning in-memory daemon, so
+            # permalink resolution is FASTER (~30s) while costing zero
+            # agent ticks. publish-ready itself is a safety net only —
+            # urgent ships should use the on-demand CLI/Discord path.
+            "schedule": "30 6 * * *",
             "prompt": publish_ready,
-        },
-        {
-            "name": "zeus-content-publish-watcher",
-            # Every 10 min, offset by 5 min from the publish-ready job so we
-            # don't fight for Publer's rate limit. Picks up fresh schedules
-            # quickly and patches Notion + sends the "post is LIVE" email.
-            "schedule": "5,15,25,35,45,55 * * * *",
-            "prompt": publish_watcher,
         },
         {
             "name": "zeus-content-daily-crawl",
