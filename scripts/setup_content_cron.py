@@ -101,102 +101,111 @@ def _resolve_niche(cli_override: str = "") -> List[str]:
     return _load_niche_from_config()
 
 def _build_jobs(niche: List[str]):
-    """Build the three job specs from a list of niche topics.
+    """Build the job specs from a list of niche topics.
 
-    Prompts are self-contained — no skill auto-load. The skill SKILL.md
-    files were ~32K each and got injected verbatim into every cron run's
-    system prompt, blowing TTFT past 5 min on flash models. The agent
-    picks up Notion + Publer credentials from env and figures out the
-    HTTP calls via execute_code; the prompt only tells it what to do,
-    not how (the skill / API docs are accessible via skills_list/skill_view
-    if the agent needs them mid-run).
+    Prompts are deliberately narrow: every content-generating job is just
+    "run this one command, report the exit code, exit." The agent is
+    explicitly forbidden from drafting, calling fal/Notion/Publer, or
+    sending emails in its own context. The deterministic Python scripts
+    own all of that — they handle the cost ledger, Notion archive,
+    per-platform Publer scheduling with explicit timestamps, and the
+    unified email rollup. Letting the agent improvise has historically
+    caused: bulk-Publer slot rejections, premature `published` emails sent
+    before posts went live, and orphaned ledger rows missing artifact_dir
+    + phase_durations_ms.
     """
-    phrase = _format_niche(niche)
-
-    common_outro = (
-        " Use execute_code with the Notion API (env: NOTION_API_KEY, see "
-        "~/.hermes/notion_ids.json) and Publer API (env: PUBLER_API_KEY, "
-        "PUBLER_WORKSPACE_ID, PUBLER_*_ID per platform). Email summary via "
-        "AgentMail (AGENTMAIL_API_KEY). Always include a cost rollup "
-        "(image + LLM tokens + API calls) in the email."
+    PIPELINE = "skills/autonomous-ai-agents/multi-agent-content-pipeline/scripts"
+    HARD_RULES = (
+        "\n\nHARD RULES (violating any = task failure):\n"
+        "  • Your ONLY action is the bash command below. Do not write content, "
+        "do not call fal / Notion / Publer / OpenRouter / fish.audio / any "
+        "other API in your own context. The script owns ALL of that.\n"
+        "  • Do NOT send emails yourself. The script's email_notify path "
+        "sends the unified rollup with real platform permalinks AFTER "
+        "publish_watcher resolves them. Your own emails would lie about "
+        "post status (we got burned: an agent emailed 'Status: published' "
+        "16 minutes before Publer reported all 4 platforms FAILED).\n"
+        "  • Do NOT improvise a topic — the script's `--auto` flag uses "
+        "perplexity/sonar-pro to pick a current headline and refuses if no "
+        "story <72h old. Trust it.\n"
+        "  • If the script exits non-zero, capture stdout+stderr to "
+        "~/.hermes/zeus_email_outbox/<timestamp>_cron_error.txt and exit. "
+        "Do NOT retry. Do NOT attempt a fallback flow.\n"
+        "  • Run the command via execute_code with cwd=/opt/zeus (host) or "
+        "/opt/zeus (container). The repo root contains the `skills/` tree.\n"
     )
 
     article_slot = (
-        f"Generate and publish ONE long-form {phrase} article on the most "
-        f"newsworthy story from the past 4-6h. Skip stories already covered "
-        f"today (check the Notion archive). Invoke the proper artifact-first "
-        f"pipeline via execute_code: "
-        f"`python skills/autonomous-ai-agents/multi-agent-content-pipeline/"
-        f"scripts/pipeline_test.py --type long_article --auto --publish` so "
-        f"the cost ledger (picker + orchestrator + fal image), Notion "
-        f"archive, and crash-recovery flow all run. The script handles topic "
-        f"selection from current headlines, image generation, Notion archive, "
-        f"and Publer publishing — do NOT draft, generate, or publish in your "
-        f"own context. Be decisive — no questions."
-        + common_outro
+        f"Run ONE deterministic long-form {_format_niche(niche)} article "
+        f"pipeline. Topic auto-picked from past-72h headlines; script skips "
+        f"already-archived stories.\n\n"
+        f"COMMAND (this is the entire task):\n"
+        f"  python {PIPELINE}/pipeline_test.py --type long_article --auto --publish\n\n"
+        f"On exit 0: report the run_id and total_cost_usd from the last "
+        f"line of ~/.hermes/zeus_cost_ledger.jsonl in one line. Done."
+        + HARD_RULES
     )
 
     carousel_slot = (
-        f"Generate and publish ONE {phrase} carousel (3-5 portrait slides) on "
-        f"a story from the past 4-6h that lends itself to visual breakdown — "
-        f"timeline, ranking, or step-by-step. Skip stories already covered "
-        f"today (check the Notion archive). Invoke the proper artifact-first "
-        f"pipeline via execute_code: "
-        f"`python skills/autonomous-ai-agents/multi-agent-content-pipeline/"
-        f"scripts/pipeline_test.py --type carousel --topic '<headline>' "
-        f"--slides 4 --publish` so the cost ledger, Notion archive, and "
-        f"crash-recovery flow all run. Be decisive — no questions."
-        + common_outro
+        f"Run ONE deterministic {_format_niche(niche)} carousel pipeline "
+        f"(4 portrait slides). Topic auto-picked from past-72h headlines.\n\n"
+        f"COMMAND (this is the entire task):\n"
+        f"  python {PIPELINE}/pipeline_test.py --type carousel --auto --slides 4 --publish\n\n"
+        f"On exit 0: report the run_id and total_cost_usd from the last "
+        f"line of ~/.hermes/zeus_cost_ledger.jsonl in one line. Done."
+        + HARD_RULES
     )
 
     notion_ideas = (
-        "Run the Content Ideas ingester via execute_code: "
-        "`python skills/autonomous-ai-agents/multi-agent-content-pipeline/"
-        "scripts/ingest_ideas.py --once`. The script reads 'New' rows from "
+        "Run the Content Ideas ingester. The script reads 'New' rows from "
         "the Notion Content Ideas DB, distills each (URL / YouTube / text) "
         "into a drafted archive page, and (when 'Auto Publish' is checked) "
-        "flips the archive row to 'Ready to Publish' for the publish-ready "
-        "job to ship. If the script reports zero new ideas, exit silently — "
-        "no email, no further work. Otherwise email a one-line summary "
-        "listing the compiled archive page URLs. Do NOT do any drafting in "
-        "your own context — the script handles all generation, archival, "
-        "ledger, and notification. Your job is just to invoke it and "
-        "summarize."
+        "flips the archive row to 'Ready to Publish'.\n\n"
+        f"COMMAND (this is the entire task):\n"
+        f"  python {PIPELINE}/ingest_ideas.py --once\n\n"
+        "On exit 0 with no work done: exit silently (no email). On exit 0 "
+        "with new pages: report the count and archive page IDs in one line."
+        + HARD_RULES
     )
 
     publish_ready = (
-        "Run the on-demand publisher via execute_code: "
-        "`python skills/autonomous-ai-agents/multi-agent-content-pipeline/"
-        "scripts/publish_from_notion.py --once`. The script reads archive "
-        "rows whose Status is 'Ready to Publish', regenerates any missing "
-        "media, ships through Publer, and lets the publish_watcher resolve "
-        "permalinks out-of-process. If zero rows are ready, exit silently. "
-        "Otherwise email a one-line summary of which pieces were scheduled. "
-        "Do NOT draft, regenerate, or modify content in your own context — "
-        "the script is the entire pipeline. Your job is just to invoke it "
-        "and summarize."
+        "Run the Notion-driven publisher. The script reads archive rows "
+        "whose Status is 'Ready to Publish', regenerates any missing media, "
+        "and ships per-platform via Publer with explicit scheduled_at "
+        "timestamps. publish_watcher resolves permalinks out-of-process.\n\n"
+        f"COMMAND (this is the entire task):\n"
+        f"  python {PIPELINE}/publish_from_notion.py --once\n\n"
+        "On exit 0 with empty queue: exit silently. On exit 0 with "
+        "scheduled rows: report run_ids in one line."
+        + HARD_RULES
     )
 
     publish_watcher = (
-        "Run the publish watcher via execute_code: "
-        "`python skills/autonomous-ai-agents/multi-agent-content-pipeline/"
-        "scripts/publish_watcher.py --once`. The script polls Publer for "
-        "live permalinks of every scheduled run still in the queue, patches "
-        "the Notion archive row AND the per-publish row in the Content "
-        "Pipeline DB with real Post URLs, then sends the final 'live' email. "
-        "If the queue is empty, exit silently. Otherwise email one line per "
-        "resolved run with the platform URLs. Do NOT do any drafting — the "
-        "watcher is purely a poll+patch loop."
+        "Run the publish watcher (poll Publer for live permalinks, patch "
+        "Notion + Content Pipeline DB with real Post URLs, send the final "
+        "'live' email via the unified email_notify path).\n\n"
+        f"COMMAND (this is the entire task):\n"
+        f"  python {PIPELINE}/publish_watcher.py --once\n\n"
+        "On empty queue: exit silently. On resolved runs: report one line "
+        "per run with platform URLs."
+        + HARD_RULES
     )
 
     daily_crawl = (
-        f"Build today's {phrase} content brief. Crawl the past 24h headlines "
-        f"across the niche, pick the top 6 stories worth long-form coverage, "
-        f"write 50-100 word briefs (angle, key facts, why it matters, "
-        f"suggested headline), save them to the Notion content ideas "
-        f"database tagged 'queued' so article-slot jobs pick them up first. "
-        f"Email the brief to the team for editorial review."
-        + common_outro
+        f"Build today's {_format_niche(niche)} content brief by populating "
+        f"the Notion Content Ideas DB. The crawler picks 6 stories from the "
+        f"past 24h, writes 50-100 word briefs, tags them 'queued'.\n\n"
+        f"This job does NOT have a deterministic script yet — you ARE "
+        f"allowed to use execute_code to: (a) fetch RSS feeds, (b) call "
+        f"OpenRouter for the briefs (gemini-2.5-flash, never v4-pro — this "
+        f"is the only exception to the hard rules below), (c) write rows "
+        f"to the Notion Ideas DB. Do NOT generate images. Do NOT publish. "
+        f"Do NOT send a separate notification email — the brief is "
+        f"reviewable in Notion."
+        + HARD_RULES.replace(
+            "Your ONLY action is the bash command below.",
+            "Your ONLY action is to populate the Notion Ideas DB with 6 briefs.",
+        )
     )
 
     return [
