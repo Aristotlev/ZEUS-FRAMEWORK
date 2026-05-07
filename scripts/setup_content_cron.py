@@ -119,6 +119,13 @@ def _build_jobs(niche: List[str]):
     + phase_durations_ms.
     """
     PIPELINE = "skills/autonomous-ai-agents/multi-agent-content-pipeline/scripts"
+    # Absolute path to the venv interpreter that has all pipeline deps
+    # (requests, fal-client, notion-client, etc.). The prod container's
+    # `/usr/bin/python3` lacks them, and bare `python` isn't on PATH at
+    # all, so a manual `docker exec` rerun of these commands would fail
+    # without this. Cron-fired runs go through the gateway's venv-aware
+    # shell so they worked either way, but pinning makes both paths match.
+    PYTHON = "/opt/hermes/.venv/bin/python"
     HARD_RULES = (
         "\n\nHARD RULES (violating any = task failure):\n"
         "  • Your ONLY action is the bash command below. Do not write content, "
@@ -144,7 +151,7 @@ def _build_jobs(niche: List[str]):
         f"pipeline. Topic auto-picked from past-72h headlines; script skips "
         f"already-archived stories.\n\n"
         f"COMMAND (this is the entire task):\n"
-        f"  python {PIPELINE}/pipeline_test.py --type long_article --auto --publish\n\n"
+        f"  {PYTHON} {PIPELINE}/pipeline_test.py --type long_article --auto --publish\n\n"
         f"On exit 0: report the run_id and total_cost_usd from the last "
         f"line of ~/.hermes/zeus_cost_ledger.jsonl in one line. Done."
         + HARD_RULES
@@ -154,7 +161,7 @@ def _build_jobs(niche: List[str]):
         f"Run ONE deterministic {_format_niche(niche)} carousel pipeline "
         f"(4 portrait slides). Topic auto-picked from past-72h headlines.\n\n"
         f"COMMAND (this is the entire task):\n"
-        f"  python {PIPELINE}/pipeline_test.py --type carousel --auto --slides 4 --publish\n\n"
+        f"  {PYTHON} {PIPELINE}/pipeline_test.py --type carousel --auto --slides 4 --publish\n\n"
         f"On exit 0: report the run_id and total_cost_usd from the last "
         f"line of ~/.hermes/zeus_cost_ledger.jsonl in one line. Done."
         + HARD_RULES
@@ -168,7 +175,7 @@ def _build_jobs(niche: List[str]):
         "manual idea entry isn't time-sensitive; on-demand invocation "
         "(if you ever need it sooner) is faster than tightening this cron.\n\n"
         f"COMMAND (this is the entire task):\n"
-        f"  python {PIPELINE}/ingest_ideas.py --once\n\n"
+        f"  {PYTHON} {PIPELINE}/ingest_ideas.py --once\n\n"
         "On exit 0 with no work done: exit silently (no email). On exit 0 "
         "with new pages: report the count and archive page IDs in one line."
         + HARD_RULES
@@ -182,7 +189,7 @@ def _build_jobs(niche: List[str]):
         "ticks that previously found nothing to do).\n\n"
         f"COMMANDS (run both in order, this is the entire task):\n"
         f"  bash {PIPELINE}/watcher_supervisor.sh\n"
-        f"  python {PIPELINE}/publish_from_notion.py --once\n\n"
+        f"  {PYTHON} {PIPELINE}/publish_from_notion.py --once\n\n"
         "watcher_supervisor.sh is idempotent — no-op if daemon alive, "
         "respawns it if dead (it self-respawns on python crashes, so this "
         "only matters after a container restart).\n\n"
