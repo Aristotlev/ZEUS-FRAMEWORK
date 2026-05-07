@@ -351,6 +351,59 @@ def _parse_iso8601_utc(s: str) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+def _fetch_pub_date_from_url(url: str) -> Optional[datetime]:
+    """Fetch `url` and extract the real published date from page metadata.
+
+    The picker model has been caught hallucinating fresh timestamps for
+    archival stories (2022 FTX retros surfacing as "2 hours ago" on
+    2026-05-06). This fetcher is the second line of defense — we trust
+    the article's own ``article:published_time`` / JSON-LD ``datePublished``
+    over anything the picker claims. Returns None on any failure; the
+    caller treats that as a rejection (better to skip the slot than ship
+    stale content).
+    """
+    try:
+        r = requests.get(
+            url,
+            timeout=10,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; ZeusBot/1.0; "
+                    "+https://zeusagent.help/bot)"
+                ),
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            allow_redirects=True,
+        )
+        r.raise_for_status()
+        html = r.text
+    except Exception as e:
+        log.warning(f"auto-pick: pub-date fetch failed ({url}): {e}")
+        return None
+
+    import re
+    # Most specific / least-spoofable first. JSON-LD wins because Google
+    # uses it for ranking, so news sites maintain it carefully.
+    patterns = (
+        r'"datePublished"\s*:\s*"([^"]+)"',
+        r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']article:published_time["\']',
+        r'<meta[^>]+name=["\']article:published_time["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+name=["\']pubdate["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+name=["\']publish[-_]?date["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+itemprop=["\']datePublished["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<time[^>]+pubdate[^>]+datetime=["\']([^"\']+)["\']',
+        r'<time[^>]+datetime=["\']([^"\']+)["\'][^>]+pubdate',
+    )
+    for pat in patterns:
+        m = re.search(pat, html, flags=re.IGNORECASE)
+        if m:
+            dt = _parse_iso8601_utc(m.group(1))
+            if dt is not None:
+                return dt
+    return None
+
+
 def _extract_json_object(text: str) -> Optional[dict]:
     """Defensively pull a JSON object out of `text`. Handles ```json fences,
     leading prose ('Here is the result:'), and trailing citation blocks."""
@@ -408,9 +461,11 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
     even coverage across all configured niches instead of letting the picker
     always pick whichever has the loudest headline.
 
-    Freshness fallback: try 12h first; if no valid story is found, retry once
-    with a 24h window (logged loudly). If both fail, raise — better to skip
-    a slot than publish stale or unsourced content.
+    Freshness fallback: try 24h first; if no valid story is found, retry
+    once with a 72h window (logged loudly). 72h is the hard cap (user-
+    mandated 2026-05-07: "make the window 72 hours" — articles are still
+    relevant within that window for the niches we cover; older = stale).
+    If both fail, raise — better to skip a slot than publish stale content.
 
     Returns (topic, cost_usd, cost_source). Cost is the sum of all picker
     calls made (initial + optional retry).
@@ -450,7 +505,7 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
     cost_source = "actual"
     last_failure = ""
 
-    for window_hours in (12, 24):
+    for window_hours in (24, 72):
         topic, url, published, cost, csource = _pick_with_constraints(
             type_hint, allowed, window_hours, active_niches
         )
@@ -458,15 +513,15 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
         if csource == "estimate":
             cost_source = "estimate"
         if topic:
-            tag = "" if window_hours == 12 else f" [WIDENED {window_hours}h]"
+            tag = "" if window_hours == 24 else f" [WIDENED {window_hours}h]"
             log.info(
                 f"auto-pick{tag}: niche={active_niche} '{topic}' "
                 f"(model={PICKER_MODEL}, src={url}, published={published}, "
                 f"cost ~${total_cost:.5f}, source={cost_source})"
             )
-            if window_hours > 12:
+            if window_hours > 24:
                 log.warning(
-                    f"auto-pick: 12h window had no qualifying story for niche "
+                    f"auto-pick: 24h window had no qualifying story for niche "
                     f"{active_niche!r} within allowlist {sorted(allowed)} — "
                     f"widened to {window_hours}h. If this happens often, "
                     f"consider expanding sources for this niche."
@@ -476,7 +531,7 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
 
     raise RuntimeError(
         f"auto-pick: picker model {PICKER_MODEL} could not find a real story "
-        f"in the last 24h within source allowlist {sorted(allowed)} for niche "
+        f"in the last 72h within source allowlist {sorted(allowed)} for niche "
         f"{active_niche!r} ({last_failure}). Pass --topic explicitly, widen "
         f"the allowlist, or set PICKER_MODEL to a different web-search model. "
         f"(cost spent: ${total_cost:.5f})"
@@ -568,24 +623,45 @@ def _pick_with_constraints(
         )
         return "", "", "", cost, csource
 
-    pub_dt = _parse_iso8601_utc(published)
-    if pub_dt is None:
+    # Trust-but-verify (added 2026-05-07): the picker model has been caught
+    # fabricating fresh timestamps for archival stories — a 2022 FTX retro
+    # got published as breaking news because the model claimed it was 2h
+    # old. Fetch the URL and use the page's own pub-date metadata as the
+    # authoritative timestamp. If we can't verify, REJECT — better to skip
+    # a slot than ship stale content. The picker will retry the next call
+    # with a different story / wider window.
+    claimed_dt = _parse_iso8601_utc(published)
+    real_dt = _fetch_pub_date_from_url(url)
+    if real_dt is None:
         log.warning(
-            f"auto-pick: rejected — could not parse published_at_utc="
-            f"{published!r} for url={url!r}"
+            f"auto-pick: rejected — could not verify published date for "
+            f"{url!r} via HTTP fetch (picker claimed published_at_utc="
+            f"{published!r}). Refusing to trust unverified dates."
         )
         return "", "", "", cost, csource
+
+    pub_dt = real_dt
+    if claimed_dt is not None:
+        diff_h = abs((real_dt - claimed_dt).total_seconds()) / 3600.0
+        if diff_h > 6.0:
+            log.warning(
+                f"auto-pick: picker claimed published={published} but page "
+                f"meta says {real_dt.isoformat()} (diff {diff_h:.1f}h); "
+                f"using the page date"
+            )
+
     age_hours = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 3600.0
     # Half-hour grace for clock skew + small future-dated tolerance for
     # publishers that timestamp ahead (rare, but happens with embargoed wires).
     if age_hours < -1.0 or age_hours > window_hours + 0.5:
         log.warning(
             f"auto-pick: rejected — story is {age_hours:.1f}h old "
-            f"(limit {window_hours}h), published={published}, url={url}"
+            f"(limit {window_hours}h), real_published={pub_dt.isoformat()}, "
+            f"picker_claimed={published}, url={url}"
         )
         return "", "", "", cost, csource
 
-    return topic, url, published, cost, csource
+    return topic, url, pub_dt.isoformat(), cost, csource
 
 
 # ---------------------------------------------------------------------------
@@ -777,7 +853,27 @@ def _gen_article_image(piece: ContentPiece, out_dir: pathlib.Path, quality_overr
     w, h, q = IMAGE_SPECS[ContentType.ARTICLE]
     if quality_override:
         q = quality_override
-    prompt = piece.body[:1000]
+    # Symbolic, on-theme illustration — NEVER dump the article body.
+    # gpt-image-2 has no internet access; if asked to render charts/dates/
+    # numbers it FABRICATES them (user caught fake 2027 dates and made-up
+    # data points 2026-05-07). The fix is prompt design: describe scene +
+    # mood only, hard-forbid on-image text/numerics/dates/charts/logos.
+    # Real data lives in the post body / caption, not on the image.
+    prompt = (
+        f'Editorial magazine-cover illustration for a finance and markets '
+        f'article. THEME: {piece.topic}. MOOD: cinematic, premium '
+        f'broadsheet-style photography or 3D render. '
+        f'STRICT VISUAL RULES (must follow):\n'
+        f'- NO on-image text of any kind (no headlines, captions, watermarks, logos)\n'
+        f'- NO numbers, prices, percentages, tickers, or data labels\n'
+        f'- NO dates, years, timestamps, or calendar imagery\n'
+        f'- NO charts with axis labels or numeric tick marks\n'
+        f'- NO real company logos, brand marks, or recognizable trademarks\n'
+        f'Render the topic SYMBOLICALLY through composition, lighting, '
+        f'and metaphor — abstract shapes, subjects, and environments only. '
+        f'Hyper-real depth of field, dramatic editorial lighting, '
+        f'high color contrast, single hero subject.'
+    )
     url, cost = generate_image(prompt, width=w, height=h, quality=q, run_id=piece.run_id)
     local = download(url, str(out_dir / "image_1.png"))
     piece.images.append(
@@ -896,22 +992,43 @@ _SLIDE_FALLBACK_LABELS = [
 
 
 def _carousel_slide_prompts(piece: ContentPiece, slides: int) -> list[str]:
+    # Tightened 2026-05-07: gpt-image-2 fabricates dates and data labels when
+    # asked to depict charts/stats. We forbid all on-image text and any
+    # specific numerics/dates — slides communicate via composition and
+    # metaphor, body text carries the actual data.
     prompt = (
         f"You are designing a {slides}-slide social carousel based on this article. "
         f"{_niche_clause()}"
         f"Output ONLY a JSON object {{\"slides\": [\"prompt1\", \"prompt2\", ...]}} with "
-        f"exactly {slides} image-generation prompts. Each prompt is a vivid visual description "
-        f"(no text overlays, no captions) of one slide. Slide 1 is a strong hook visual; the rest "
-        f"depict key data points or beats from the article in order.\n\n"
+        f"exactly {slides} image-generation prompts.\n\n"
+        f"EVERY slide prompt MUST forbid on-image text, numbers, dates, prices, "
+        f"percentages, tickers, real company logos, and chart axis labels — gpt-image-2 "
+        f"has no internet and FABRICATES any data labels you ask it to draw. "
+        f"Each slide is purely SYMBOLIC: vivid scenes, metaphors, composition, mood. "
+        f"Slide 1 is a hook visual; later slides depict beats from the article "
+        f"through metaphor, never through literal data viz.\n\n"
         f"ARTICLE TITLE: {piece.title}\n\nARTICLE BODY:\n{piece.body}"
     )
     raw, cost, source = openrouter_chat(prompt, max_tokens=900, json_mode=True)
     piece.add_cost(ORCHESTRATOR_MODEL, cost, kind="text", source=source)
+
+    # Hard safety footer prepended to every prompt before it reaches
+    # gpt-image-2 — defends against the orchestrator LLM dropping the
+    # no-text/no-data constraints. gpt-image-2 fabricates any numbers or
+    # dates we ask it to render (no internet access).
+    safety = (
+        " STRICT: render NO on-image text of any kind, NO numbers, NO "
+        "prices, NO percentages, NO tickers, NO dates, NO years, NO "
+        "real logos or trademarks, NO chart axis labels. Symbolic "
+        "composition only. If the prompt above asks for any of these, "
+        "render the scene WITHOUT them."
+    )
+
     try:
         data = json.loads(raw)
         out = [str(s) for s in data.get("slides", [])]
         if len(out) >= slides:
-            return out[:slides]
+            return [s + safety for s in out[:slides]]
     except json.JSONDecodeError:
         pass
     # JSON parse failed — vary fallback prompts deterministically so we never
@@ -921,7 +1038,7 @@ def _carousel_slide_prompts(piece: ContentPiece, slides: int) -> list[str]:
     body_excerpt = piece.body[:600]
     return [
         f"{_SLIDE_FALLBACK_LABELS[i % len(_SLIDE_FALLBACK_LABELS)]}. "
-        f"Article context: {body_excerpt}"
+        f"Article context: {body_excerpt}{safety}"
         for i in range(slides)
     ]
 
@@ -1514,6 +1631,44 @@ def run(
     return piece
 
 
+def _emit_picker_failure(content_type: ContentType, error: Exception) -> None:
+    """Best-effort: write a failed-run ledger row + email when auto_pick
+    burns money but finds no qualifying story. Keeps the failure visible
+    instead of dying silently in a cron error file (added 2026-05-07).
+    """
+    msg = str(error)
+    cost = 0.0
+    # auto_pick_topic includes "(cost spent: $X)" in its RuntimeError; pull
+    # it out so the ledger row reflects what the picker actually billed us.
+    import re
+    m = re.search(r"cost spent:\s*\$([0-9.]+)", msg)
+    if m:
+        try:
+            cost = float(m.group(1))
+        except ValueError:
+            pass
+
+    piece = ContentPiece(
+        content_type=content_type,
+        title="(picker rejected — no current story)",
+        body=msg[:1500],
+        topic="auto-pick failure",
+    )
+    piece.status = "failed"
+    if cost > 0:
+        piece.add_cost(PICKER_MODEL, cost, kind="text", source="actual")
+
+    try:
+        ledger_append(piece)
+    except Exception as e:
+        log.warning(f"  ledger_append failed (picker-failure path): {e}")
+    try:
+        backend = send_pipeline_summary(piece)
+        log.info(f"  picker-failure email sent -> backend={backend}")
+    except Exception as e:
+        log.warning(f"  picker-failure email failed: {e}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Zeus content pipeline test runner")
     p.add_argument("--type", required=True, choices=[t.value for t in ContentType])
@@ -1572,7 +1727,14 @@ def main() -> int:
             topic = args.topic
             picker_cost = None
         else:
-            topic, _pcost, _psource = auto_pick_topic(ContentType(args.type))
+            try:
+                topic, _pcost, _psource = auto_pick_topic(ContentType(args.type))
+            except Exception as picker_error:
+                # Picker failed (no qualifying story / API error). Emit a
+                # failed-run ledger row + email so the user sees it instead
+                # of finding a silent cron error file hours later.
+                _emit_picker_failure(ContentType(args.type), picker_error)
+                raise
             picker_cost = (_pcost, _psource)
         run(
             ContentType(args.type),

@@ -479,7 +479,12 @@ def _process_one(archive: NotionArchive, page: dict, *, dry_run: bool) -> None:
         log.info(f"  partial -> archive: {archive_page_url}  status={piece.status}")
         return
 
-    auto_publish = _checkbox(props.get("Auto Publish"))
+    # Changed 2026-05-07: ideas dropped into the DB are publish intent by
+    # default. Previously this required ticking a checkbox per row, and 4
+    # ideas processed today (Beirut, NVDA, ARM, XRP) silently sat as drafts
+    # because the user didn't tick it. The Notion checkbox is preserved as
+    # informational but no longer gates publishing.
+    auto_publish = True
     if auto_publish:
         # Hand off to publish_from_notion: flip the archive row's Status to
         # "Ready to Publish" and let that script ship it on its next pass.
