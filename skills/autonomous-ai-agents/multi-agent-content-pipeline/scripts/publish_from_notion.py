@@ -357,18 +357,27 @@ def _publish_one(archive: NotionArchive, page: dict, *, dry_run: bool) -> Option
     except Exception as e:
         log.warning(f"  update_status failed: {e}")
 
-    # Summary email + ledger row so on-demand publishes show up in the same
-    # observability surface as cron-driven runs (memory: every run must hit
-    # ledger + email + Notion).
+    # Ledger row always; email is conditional. When publish() returns at
+    # status="scheduled" the post is enqueued in Publer but live URLs haven't
+    # resolved yet — emailing now would ship `job=...` placeholders instead of
+    # real platform permalinks (regression we got bitten by). Defer to the
+    # publish_watcher daemon, which sends the email after it patches URLs.
+    # Mirrors the same logic in pipeline_test.run_pipeline.
     try:
         ledger_append(piece)
     except Exception as e:
         log.warning(f"  ledger_append failed: {e}")
-    try:
-        backend = send_pipeline_summary(piece)
-        log.info(f"  notified -> backend={backend}")
-    except Exception as e:
-        log.warning(f"  email failed: {e}")
+    if piece.status == "scheduled":
+        log.info(
+            "  email deferred to publish_watcher — will land when post URLs "
+            "resolve (watcher daemon polls every 30s)"
+        )
+    else:
+        try:
+            backend = send_pipeline_summary(piece)
+            log.info(f"  notified -> backend={backend}")
+        except Exception as e:
+            log.warning(f"  email failed: {e}")
 
     log.info(f"  done -> status={piece.status} jobs={list(piece.publer_job_ids.keys())}")
     return piece
