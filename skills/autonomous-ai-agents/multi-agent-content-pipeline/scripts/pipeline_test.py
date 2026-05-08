@@ -421,26 +421,40 @@ def _fetch_pub_date_from_url(url: str) -> Optional[datetime]:
         return None
 
     import re
-    # Most specific / least-spoofable first. JSON-LD wins because Google
-    # uses it for ranking, so news sites maintain it carefully.
+    # OpenGraph/AMP/news-meta tags first — they're authored as full ISO
+    # timestamps. JSON-LD's "datePublished" comes last because publishers
+    # frequently emit only the date there (e.g. BusinessInsider:
+    # "datePublished":"2026-05-07") while the full timestamp lives in a
+    # <meta> tag — picking up the date-only first made stories look
+    # midnight-published and dropped them outside the 24h window.
     patterns = (
-        r'"datePublished"\s*:\s*"([^"]+)"',
         r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)["\']',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']article:published_time["\']',
         r'<meta[^>]+name=["\']article:published_time["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+name=["\']datePublished["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']datePublished["\']',
         r'<meta[^>]+name=["\']pubdate["\'][^>]+content=["\']([^"\']+)["\']',
         r'<meta[^>]+name=["\']publish[-_]?date["\'][^>]+content=["\']([^"\']+)["\']',
         r'<meta[^>]+itemprop=["\']datePublished["\'][^>]+content=["\']([^"\']+)["\']',
         r'<time[^>]+pubdate[^>]+datetime=["\']([^"\']+)["\']',
         r'<time[^>]+datetime=["\']([^"\']+)["\'][^>]+pubdate',
+        r'"datePublished"\s*:\s*"([^"]+)"',
     )
+    fallback: Optional[datetime] = None
     for pat in patterns:
-        m = re.search(pat, html, flags=re.IGNORECASE)
-        if m:
+        for m in re.finditer(pat, html, flags=re.IGNORECASE):
             dt = _parse_iso8601_utc(m.group(1))
-            if dt is not None:
+            if dt is None:
+                continue
+            # Prefer any timestamp that carries an actual time-of-day; date-
+            # only matches resolve to 00:00 UTC and would falsely age the
+            # story by up to a day. Keep one as a last-resort fallback if
+            # nothing better turns up.
+            if "T" in m.group(1):
                 return dt
-    return None
+            if fallback is None:
+                fallback = dt
+    return fallback
 
 
 def _extract_json_object(text: str) -> Optional[dict]:
