@@ -402,7 +402,10 @@ def _fetch_pub_date_from_url(url: str) -> Optional[datetime]:
                     "image/avif,image/webp,*/*;q=0.8"
                 ),
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
+                # No "br" — requests doesn't decompress brotli without the
+                # brotli package, and silently hands you raw compressed bytes
+                # if the server picks it. That makes every regex match fail.
+                "Accept-Encoding": "gzip, deflate",
                 "Referer": "https://www.google.com/",
                 "Sec-Fetch-Dest": "document",
                 "Sec-Fetch-Mode": "navigate",
