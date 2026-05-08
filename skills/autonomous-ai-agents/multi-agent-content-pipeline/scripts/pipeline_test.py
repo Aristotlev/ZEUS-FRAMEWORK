@@ -290,6 +290,39 @@ def _allowed_domains_for_niches(niches: list[str]) -> set[str]:
 # rarely appear. Round-robin gives even coverage: with 6 niches and ~5 cron
 # slots/day, every niche gets a turn every ~1.2 days.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Picker proxy — opt-in residential proxy for the verifier's HTTP fetches.
+# Used to (a) bypass publisher CDN datacenter-IP blocks (CNBC/Bloomberg/WSJ
+# etc. 4xx the Hetzner IP regardless of UA) and (b) target geo-localized
+# news by encoding the country in the proxy creds (Bright Data syntax:
+# user-country-XX). Only the picker verifier uses this — fal, Publer,
+# OpenRouter, Notion go direct (proxying them adds latency without moving
+# audience reach). Unset = passthrough (current default, zero risk).
+# ---------------------------------------------------------------------------
+def _picker_proxies() -> Optional[dict]:
+    url = os.environ.get("ZEUS_PICKER_PROXY_URL", "").strip()
+    if not url:
+        return None
+    return {"http": url, "https": url}
+
+
+def _log_proxy_status_once() -> None:
+    raw = os.environ.get("ZEUS_PICKER_PROXY_URL", "").strip()
+    if not raw:
+        log.info("picker proxy: disabled (ZEUS_PICKER_PROXY_URL unset) — direct HTTP")
+        return
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(raw)
+        host_port = p.netloc.split("@", 1)[-1] if "@" in p.netloc else p.netloc
+        log.info(f"picker proxy: enabled → {p.scheme}://<creds>@{host_port}")
+    except Exception:
+        log.info("picker proxy: enabled (unparseable URL — creds redacted)")
+
+
+_log_proxy_status_once()
+
+
 _NICHE_ROTATION_PATH = zeus_data_path("niche_rotation.json")
 
 # ---------------------------------------------------------------------------
@@ -450,6 +483,7 @@ def _fetch_pub_date_from_url(url: str) -> Optional[datetime]:
         r = requests.get(
             url,
             timeout=10,
+            proxies=_picker_proxies(),
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
