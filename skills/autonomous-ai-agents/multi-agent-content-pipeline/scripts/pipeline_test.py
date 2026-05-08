@@ -194,26 +194,38 @@ else:
 # Defaults below are user-curated (2026-05-06). Override per-niche via
 # `content_pipeline.sources` in ~/.hermes/config.yaml.
 # ---------------------------------------------------------------------------
+# Allowlist note (2026-05-08): domains that 4xx the prod VM (Hetzner FSN1
+# datacenter IP) regardless of UA were removed — keeping them in the list
+# meant the picker would land on them ~half the time and the verifier would
+# reject every one, killing the slot. Confirmed-blocked from prod (so out):
+# cnbc.com, bloomberg.com, wsj.com, reuters.com, theblock.co, economist.com.
+# The replacements are all top-tier (MarketWatch is Dow Jones, AP is wire-of-
+# record, Fortune/BI/Axios/Guardian/TechCrunch are major desks).
 DEFAULT_SOURCES_BY_NICHE: dict[str, list[str]] = {
     "finance": [
-        "finance.yahoo.com", "cnbc.com", "bloomberg.com",
-        "reuters.com", "ft.com", "wsj.com",
+        "finance.yahoo.com", "ft.com", "marketwatch.com",
+        "businessinsider.com", "fortune.com", "axios.com",
+        "investing.com", "barrons.com",
     ],
     "stocks": [
-        "finance.yahoo.com", "cnbc.com", "bloomberg.com",
-        "reuters.com", "wsj.com",
+        "finance.yahoo.com", "marketwatch.com", "seekingalpha.com",
+        "businessinsider.com", "investing.com", "fortune.com",
+        "barrons.com",
     ],
     "forex": [
-        "reuters.com", "bloomberg.com", "ft.com", "wsj.com",
+        "ft.com", "marketwatch.com", "investing.com",
+        "businessinsider.com", "axios.com",
     ],
     "crypto": [
-        "coindesk.com", "theblock.co", "decrypt.co", "cointelegraph.com",
+        "coindesk.com", "decrypt.co", "cointelegraph.com",
     ],
     "geopolitics": [
-        "reuters.com", "aljazeera.com", "bbc.com", "economist.com", "ft.com",
+        "aljazeera.com", "bbc.com", "ft.com", "apnews.com",
+        "dw.com", "theguardian.com",
     ],
     "ai_economy": [
-        "bloomberg.com", "wsj.com", "newsdigest.ai", "reuters.com",
+        "newsdigest.ai", "techcrunch.com", "theverge.com",
+        "venturebeat.com", "arstechnica.com", "axios.com",
     ],
 }
 
@@ -371,16 +383,31 @@ def _fetch_pub_date_from_url(url: str) -> Optional[datetime]:
     caller treats that as a rejection (better to skip the slot than ship
     stale content).
     """
+    # Use a current Chrome UA + browser-shaped headers. CNBC, Yahoo Finance,
+    # WSJ etc. 403 anything that self-identifies as a bot, which silently
+    # killed every finance/stocks slot (the picker found a real story, the
+    # verifier got blocked, and the slot was rejected as "unverified").
     try:
         r = requests.get(
             url,
             timeout=10,
             headers={
                 "User-Agent": (
-                    "Mozilla/5.0 (compatible; ZeusBot/1.0; "
-                    "+https://zeusagent.help/bot)"
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
                 ),
-                "Accept": "text/html,application/xhtml+xml",
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "image/avif,image/webp,*/*;q=0.8"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Referer": "https://www.google.com/",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "cross-site",
+                "Upgrade-Insecure-Requests": "1",
             },
             allow_redirects=True,
         )
