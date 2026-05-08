@@ -7,14 +7,17 @@
 # after gateway start so a container outage / deploy gap never silently
 # swallows a scheduled post.
 #
-# Slot grace windows (mirror setup_content_cron.py schedules):
-#   article-slot   schedule "0 0,4,8,12,17,21 * * *"  → max gap 5h, grace 6h
-#   carousel-slot  schedule "30 0,12 * * *"           → max gap 12h, grace 13h
+# Slot grace window (mirrors setup_content_cron.py):
+#   article-slot   schedule "0 */2 * * *"  → max gap 2h, grace 3h
 #
 # Idempotent: every successful pipeline run writes a ledger row, so a
 # subsequent boot won't re-fire the same slot. Ledger entries from a
 # half-completed run also count as "recent" — we'd rather skip than
 # double-post on top of an in-flight pipeline.
+#
+# Carousel-slot was disabled 2026-05-08 (user pruned to article-only).
+# When re-enabled in setup_content_cron.py, restore the carousel
+# check_slot call below.
 # ============================================================================
 set -u
 
@@ -25,8 +28,7 @@ PIPELINE_REL="skills/autonomous-ai-agents/multi-agent-content-pipeline/scripts"
 LEDGER="$HERMES_HOME/.hermes/zeus_cost_ledger.jsonl"
 LOG="$HERMES_HOME/cron_catchup.log"
 
-ARTICLE_GRACE_MIN="${ZEUS_ARTICLE_GRACE_MIN:-360}"   # 6h
-CAROUSEL_GRACE_MIN="${ZEUS_CAROUSEL_GRACE_MIN:-780}" # 13h
+ARTICLE_GRACE_MIN="${ZEUS_ARTICLE_GRACE_MIN:-180}"   # 3h (cron fires every 2h)
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 
@@ -82,6 +84,7 @@ check_slot() {
 }
 
 log "=== cron_catchup start ==="
-check_slot article  article  "$ARTICLE_GRACE_MIN"  --type long_article --auto --publish
-check_slot carousel carousel "$CAROUSEL_GRACE_MIN" --type carousel --auto --slides 4 --publish
+# Match the cron's content_type: article-slot uses --type long_article,
+# which the ledger records as content_type="long_article".
+check_slot article long_article "$ARTICLE_GRACE_MIN" --type long_article --auto --publish
 log "=== cron_catchup done ==="

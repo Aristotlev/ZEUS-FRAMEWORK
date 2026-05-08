@@ -191,6 +191,19 @@ wait_for() {
 wait_for "${REDIS_HOST:-redis}" "${REDIS_PORT:-6379}" "Redis"
 wait_for "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "PostgreSQL"
 
+# Re-sync the cron job lineup from setup_content_cron.py. Idempotent —
+# wipes any existing zeus-content-* jobs first, then recreates from the
+# current spec. This means edits to setup_content_cron.py (schedule
+# changes, prompt tweaks, adding/removing slots) take effect on the next
+# `git pull && docker restart zeus-agent` without a separate SSH step.
+SETUP_CRON="$ZEUS_DIR/scripts/setup_content_cron.py"
+if [ -f "$SETUP_CRON" ]; then
+    echo "[zeus-prod] resyncing zeus-content-* cron jobs from setup_content_cron.py"
+    "$HERMES_INSTALL/.venv/bin/python" "$SETUP_CRON" \
+        2>&1 | sed 's/^/[zeus-prod cron-sync] /' || \
+        echo "[zeus-prod] WARN: setup_content_cron.py exited non-zero"
+fi
+
 echo "[zeus-prod] bootstrap complete — starting gateway (drives cron jobs)"
 
 # publish_watcher daemon — resolves Publer permalinks and fires the post-run

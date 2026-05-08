@@ -8,23 +8,19 @@ Override per-run with ``--niche "a,b,c"``.
 Idempotent: removes any existing ``zeus-content-*`` jobs before recreating,
 so re-running this updates the prompts/schedules without duplicating.
 
-Creates 5 cron jobs (publish_watcher runs as an in-memory daemon, not cron):
-  1. zeus-content-article-slot   — 6×/day: generate + post one long-form
-     article on the freshest story. Fires at 00,04,08,12,17,21 UTC.
-  2. zeus-content-carousel-slot  — 2×/day (00:30 / 12:30): one carousel.
-  3. zeus-content-notion-ideas   — 1×/day (06:15 UTC): pulls "New" rows
-     from the Notion Content Ideas DB and drafts them. Cron is a safety
-     net; for urgent ingestion run scripts/ingest_ideas.py --once on demand.
-  4. zeus-content-publish-ready  — 1×/day (06:30 UTC): ships archive rows
-     flagged "Ready to Publish" AND ensures the publish_watcher daemon is
-     alive (via watcher_supervisor.sh). Cron is a safety net for stuck
-     rows + post-container-restart daemon revival.
-  5. zeus-content-daily-crawl    — 1×/day (06:00 UTC): builds today's brief
-     into the Notion Content Ideas DB.
+Active cron jobs (2026-05-08 — pruned to one stream, will re-expand):
+  1. zeus-content-article-slot   — 12×/day on "0 */2 * * *": generate +
+     post one long-form article on the freshest story.
+
+Other job builders (carousel-slot, notion-ideas, publish-ready,
+daily-crawl) are kept in ``_build_jobs`` but excluded from the return
+list. To re-enable any of them, add their dict back to the returned
+list and re-run this script — it nukes existing jobs first, so the
+diff is reflected exactly.
 
 The publish_watcher runs as a self-respawning daemon (started by
-watcher_supervisor.sh) — polls Publer in-memory every 30s for permalink
-resolution. Faster than the old every-10-min cron, zero agent overhead.
+watcher_supervisor.sh from the entrypoint) — polls Publer in-memory
+every 30s for permalink resolution. Independent of the cron list.
 
 Run from anywhere:
     python scripts/setup_content_cron.py
@@ -229,42 +225,18 @@ def _build_jobs(niche: List[str]):
         )
     )
 
+    # Only article-slot is active (2026-05-08 — user request: one long-form
+    # post every 2h, refine later). The other prompt strings (carousel_slot,
+    # notion_ideas, publish_ready, daily_crawl) stay defined above so re-
+    # enabling any of them is a one-line dict-append below.
+    _ = (carousel_slot, notion_ideas, publish_ready, daily_crawl)  # keep refs
+
     return [
         {
             "name": "zeus-content-article-slot",
-            "schedule": "0 0,4,8,12,17,21 * * *",
+            # Every 2h on the hour (00,02,04,…,22 UTC = 12×/day).
+            "schedule": "0 */2 * * *",
             "prompt": article_slot,
-        },
-        {
-            "name": "zeus-content-carousel-slot",
-            # User-set: 12:30 PM and 12:30 AM daily (00:30 / 12:30).
-            "schedule": "30 0,12 * * *",
-            "prompt": carousel_slot,
-        },
-        {
-            "name": "zeus-content-notion-ideas",
-            # Once a day at 06:15 UTC. Manual idea entry isn't time-
-            # sensitive; the previous every-30-min cadence ran the agent
-            # 48 times/day on an empty queue at $0.01-0.02/tick.
-            "schedule": "15 6 * * *",
-            "prompt": notion_ideas,
-        },
-        {
-            "name": "zeus-content-publish-ready",
-            # Once a day at 06:30 UTC. Doubles as the watcher-daemon health
-            # check (supervisor.sh is idempotent — no-op if alive). Replaces
-            # the every-10-min agent cron + the every-10-min watcher cron;
-            # the watcher now runs as a respawning in-memory daemon, so
-            # permalink resolution is FASTER (~30s) while costing zero
-            # agent ticks. publish-ready itself is a safety net only —
-            # urgent ships should use the on-demand CLI/Discord path.
-            "schedule": "30 6 * * *",
-            "prompt": publish_ready,
-        },
-        {
-            "name": "zeus-content-daily-crawl",
-            "schedule": "0 6 * * *",
-            "prompt": daily_crawl,
         },
     ]
 
