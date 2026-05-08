@@ -218,6 +218,15 @@ DEFAULT_SOURCES_BY_NICHE: dict[str, list[str]] = {
 }
 
 
+def _normalize_niche(name: str) -> str:
+    # SOURCES_BY_NICHE keys use underscores ("ai_economy") but users configure
+    # niches in YAML with whatever spacing they like ("ai economy"). Without
+    # this, the rotation silently fails the slot every time it lands on a
+    # space-separated niche — picker raises "no source allowlist" before any
+    # API call, slot is lost.
+    return " ".join((name or "").strip().lower().split()).replace(" ", "_")
+
+
 def _load_sources_override() -> dict[str, list[str]]:
     """Read content_pipeline.sources from hermes config; return {} if missing.
 
@@ -239,7 +248,7 @@ def _load_sources_override() -> dict[str, list[str]]:
                 domains = [domains]
             cleaned = [str(d).strip().lower().lstrip(".") for d in (domains or []) if str(d).strip()]
             if cleaned:
-                out[str(niche).strip().lower()] = cleaned
+                out[_normalize_niche(str(niche))] = cleaned
         return out
     except Exception as e:
         log.warning(f"sources: could not read override from {cfg_path} ({e}); using defaults")
@@ -256,7 +265,7 @@ def _allowed_domains_for_niches(niches: list[str]) -> set[str]:
     """Union of allowed domains across the configured niches (lowercased)."""
     out: set[str] = set()
     for n in niches:
-        for d in SOURCES_BY_NICHE.get(n.strip().lower(), []):
+        for d in SOURCES_BY_NICHE.get(_normalize_niche(n), []):
             out.add(d.strip().lower().lstrip("."))
     return out
 
