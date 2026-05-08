@@ -211,6 +211,23 @@ fi
 # docker healthcheck. Touched every 60s; healthcheck tolerates 30min.
 ( while true; do touch "$HERMES_HOME/.heartbeat"; sleep 60; done ) &
 
+# Cron catch-up — fires a one-shot pipeline run for any content slot whose
+# most recent ledger entry exceeds the slot's grace window. Protects against
+# deploy windows / gateway crashes silently swallowing scheduled posts (e.g.
+# the 21:00→04:00 article + 00:30 carousel slots dropped during the
+# 2026-05-07→05-08 Discord-token gateway crash loop).
+#
+# Idempotent (writes a fresh ledger row on success → next boot won't re-fire)
+# and async (sleeps 90s so the gateway is up before we start a long-running
+# pipeline). Safe to run on every boot.
+CATCHUP_SCRIPT="$ZEUS_DIR/scripts/cron_catchup.sh"
+if [ -x "$CATCHUP_SCRIPT" ]; then
+    echo "[zeus-prod] scheduling cron catch-up (in 90s, async)"
+    ( sleep 90 && bash "$CATCHUP_SCRIPT" ) >/dev/null 2>&1 &
+else
+    echo "[zeus-prod] WARN: cron_catchup.sh not found at $CATCHUP_SCRIPT"
+fi
+
 # Foreground: run the gateway. Its built-in cron-ticker thread fires the jobs
 # registered by setup_content_cron.py every 60s. When the gateway exits the
 # container exits, and `restart: unless-stopped` brings it back up.
