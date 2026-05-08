@@ -292,6 +292,65 @@ def _allowed_domains_for_niches(niches: list[str]) -> set[str]:
 # ---------------------------------------------------------------------------
 _NICHE_ROTATION_PATH = zeus_data_path("niche_rotation.json")
 
+# ---------------------------------------------------------------------------
+# Picker history — every accepted pick is recorded (url, topic, niche,
+# timestamp). On the next pick we (a) tell the LLM to AVOID these recent URLs
+# in its prompt, and (b) reject post-hoc if it picks one anyway. Without this
+# the picker reconverges on whatever's hottest, so consecutive niche slots
+# (e.g. finance at 12:00 and stocks at 14:00) often returned the SAME story
+# — a single Alphabet/Nvidia headline got published twice on different dates.
+# ---------------------------------------------------------------------------
+_PICKER_HISTORY_PATH = zeus_data_path("picker_history.json")
+# 7-day window; long enough to cover a story's news cycle, short enough not
+# to bloat the prompt. ~12 picks/day × 7 = 84, capped at 120 below for safety.
+_PICKER_HISTORY_DEDUP_HOURS = 24 * 7
+_PICKER_HISTORY_MAX = 120
+
+
+def _load_picker_history() -> list[dict]:
+    try:
+        with _PICKER_HISTORY_PATH.open() as fh:
+            data = json.load(fh)
+        if isinstance(data, list):
+            return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return []
+
+
+def _recent_picked_urls(window_hours: int = _PICKER_HISTORY_DEDUP_HOURS) -> list[dict]:
+    """Picker history entries from the last `window_hours` hours, oldest-first.
+    Each entry: {niche, topic, url, picked_at}."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    out: list[dict] = []
+    for entry in _load_picker_history():
+        try:
+            picked = datetime.fromisoformat(str(entry.get("picked_at", "")))
+            if picked.tzinfo is None:
+                picked = picked.replace(tzinfo=timezone.utc)
+            if picked >= cutoff and entry.get("url"):
+                out.append(entry)
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def _record_picker_choice(niche: str, topic: str, url: str) -> None:
+    hist = _load_picker_history()
+    hist.append({
+        "niche": niche,
+        "topic": topic,
+        "url": url,
+        "picked_at": datetime.now(timezone.utc).isoformat(),
+    })
+    hist = hist[-_PICKER_HISTORY_MAX:]
+    try:
+        _PICKER_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _PICKER_HISTORY_PATH.open("w") as fh:
+            json.dump(hist, fh, indent=2)
+    except OSError as e:
+        log.warning(f"picker history: could not persist ({e}) — next pick may dupe")
+
 
 def _pick_next_niche() -> str:
     """Read rotation state, return next niche, advance and persist. On any
@@ -579,6 +638,7 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
                     f"widened to {window_hours}h. If this happens often, "
                     f"consider expanding sources for this niche."
                 )
+            _record_picker_choice(active_niche, topic, url)
             return topic, total_cost, cost_source
         last_failure = f"window={window_hours}h: no qualifying story"
 
@@ -603,6 +663,24 @@ def _pick_with_constraints(
     today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y at %H:%M UTC")
     domain_list = ", ".join(sorted(allowed))
     niche_str = " / ".join(active_niches)
+
+    recent = _recent_picked_urls()
+    avoid_block = ""
+    if recent:
+        # Show the most recent first; cap at 30 to keep the prompt small while
+        # still covering ~2.5 days of picks at the current cron rate.
+        recent_lines = [
+            f'- {e["url"]}  ("{e.get("topic","")[:80]}", {e.get("niche","?")})'
+            for e in recent[-30:][::-1]
+        ]
+        avoid_block = (
+            f"\nDO NOT pick any story whose source_url matches — or whose "
+            f"headline is the same news event as — any of these recently-"
+            f"covered stories (we already published these):\n"
+            + "\n".join(recent_lines)
+            + "\n\nPick a DIFFERENT, fresh story."
+        )
+
     prompt = (
         f"You are a news picker. Today is {today}.\n\n"
         f"Search the live web RIGHT NOW for the single most newsworthy "
@@ -613,7 +691,8 @@ def _pick_with_constraints(
         f"2. The story MUST have been published within the last {window_hours} "
         f"hours from now ({today}). Not days, not weeks — hours.\n"
         f"3. Output ONLY a JSON object — no preamble, no markdown fences, no "
-        f"commentary, no trailing prose.\n\n"
+        f"commentary, no trailing prose.\n"
+        f"{avoid_block}\n\n"
         f"JSON schema:\n"
         f"{{\n"
         f'  "headline": "<exact published headline>",\n'
@@ -673,6 +752,18 @@ def _pick_with_constraints(
         log.warning(
             f"auto-pick: rejected — host {host!r} not in allowlist "
             f"{sorted(allowed)} (url={url!r})"
+        )
+        return "", "", "", cost, csource
+
+    # Cross-niche dedup: even with the AVOID block in the prompt the picker
+    # sometimes ignores it and re-returns a story we already covered. Hard
+    # reject if its url is in our recent history. The caller's window-widen
+    # retry will give it another shot at finding something new.
+    recent_urls = {e["url"] for e in _recent_picked_urls() if e.get("url")}
+    if url in recent_urls:
+        log.warning(
+            f"auto-pick: rejected — already covered recently (url={url!r}). "
+            f"Picker ignored AVOID list."
         )
         return "", "", "", cost, csource
 
