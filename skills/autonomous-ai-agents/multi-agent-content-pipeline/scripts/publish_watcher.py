@@ -320,21 +320,16 @@ def _final_status(states: dict[str, str], piece: ContentPiece, past_deadline: bo
     # a run where TikTok went live but the URL never came back.
     if confirmed and not failed and not pending:
         return "posted"
-    # KEY FIX: don't archive a run as failed just because the deadline passed
-    # while platforms are still pending. Publer commonly publishes minutes-
-    # to-hours after our scheduling call (their feed-spacing logic), so a
-    # 12-min deadline + a pending platform used to dump healthy runs into
-    # done.jsonl with status=failed and no URLs. Now we only finalise when
-    # there's nothing left pending — past_deadline just enables the
-    # partial-vs-failed distinction at that point.
-    if not pending:
-        if past_deadline:
-            if confirmed:
-                return "partial"
-            return "failed"
-        # Nothing pending, nothing confirmed yet, deadline not reached:
-        # everything's still in flight on Publer's side.
-    return "scheduled"  # still in flight
+    if past_deadline:
+        # Past the row's hard deadline. Stop waiting on still-pending
+        # platforms — finalize now. Treating pending as failed lets the row
+        # leave the queue and the email/ledger/notion close-out happen.
+        # Was: returned "scheduled" forever whenever any platform stayed
+        # pending past deadline, leaking 4 May-7 + 3 May-8 rows for 37-55h.
+        if confirmed:
+            return "partial"
+        return "failed"
+    return "scheduled"  # pre-deadline: keep waiting on Publer
 
 
 def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:

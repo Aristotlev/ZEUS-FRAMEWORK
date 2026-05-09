@@ -9,22 +9,25 @@ Idempotent: removes any existing ``zeus-content-*`` jobs before recreating,
 so re-running this updates the prompts/schedules without duplicating.
 
 Active cron jobs (2026-05-09):
-  1. zeus-content-article-slot       — 12×/day on "0 */2 * * *": auto-pick
+  1. zeus-content-article-slot       — 24×/day on "0 * * * *": auto-pick
      a fresh past-72h headline, generate + publish one long-form article.
-  2. zeus-content-ideas-ingest       — daily 06:00 UTC: drain Notion Ideas
+  2. zeus-content-carousel-slot      — 24×/day on "30 * * * *": auto-pick
+     a fresh past-72h headline, generate + publish one 4-slide carousel.
+     Offset 30 min from article-slot so the feed gets one piece every
+     30 min (article :00, carousel :30).
+  3. zeus-content-ideas-ingest       — daily 06:00 UTC: drain Notion Ideas
      DB into the chosen content type and queue for publish.
-  3. zeus-content-publish-ready      — every 30m: drip-feed ONE row at a
+  4. zeus-content-publish-ready      — every 30m: drip-feed ONE row at a
      time from the "Ready to Publish" queue (FIFO by created_time, capped
      at 72h freshness). Also keeps publish_watcher alive via
      watcher_supervisor.sh (no-op when daemon is healthy).
-  4. zeus-content-weekly-analytics   — Sunday 17:00 UTC: weekly Publer
+  5. zeus-content-weekly-analytics   — Sunday 17:00 UTC: weekly Publer
      post-insight rollup → Notion DB row + email report.
 
-Inactive job builders (carousel-slot, daily-crawl) remain defined in
-``_build_jobs`` for easy re-enable but are excluded from the returned
-list. To re-enable, add their dict back to the returned list and re-run
-this script — it nukes existing zeus-content-* jobs first, so the diff
-is reflected exactly.
+Inactive job builder (daily-crawl) remains defined in ``_build_jobs`` for
+easy re-enable but is excluded from the returned list. To re-enable, add
+its dict back to the returned list and re-run this script — it nukes
+existing zeus-content-* jobs first, so the diff is reflected exactly.
 
 The publish_watcher runs as a self-respawning daemon (started by
 watcher_supervisor.sh from the entrypoint) — polls Publer in-memory
@@ -258,19 +261,29 @@ def _build_jobs(niche: List[str]):
     #     paced, not time-sensitive.
     # publish_watcher (the daemon, NOT a cron) handles permalink
     # resolution every 30s in-memory; it's started by the entrypoint via
-    # watcher_supervisor.sh and self-respawns. carousel_slot and daily_crawl
-    # stay defined above for easy re-enable.
-    _ = (carousel_slot, daily_crawl)  # keep refs
+    # watcher_supervisor.sh and self-respawns. daily_crawl stays defined
+    # above for easy re-enable.
+    _ = daily_crawl  # keep ref
 
     return [
         {
             "name": "zeus-content-article-slot",
-            # Every 2h on the hour = 12×/day. Publer is on the maxed-out
-            # Business plan as of 2026-05-09, so the trial throttle that
-            # capped non-Twitter platforms at ~4/day/platform is gone —
-            # FB/IG/LI/TT/YT all accept the full 12-post cadence now.
-            "schedule": "0 */2 * * *",
+            # Hourly on the hour = 24×/day. Publer Business + native
+            # platform daily caps (~150/day each on FB/IG/LI/TT/X) leave
+            # plenty of headroom; we were leaving capacity on the table at
+            # 12/day. carousel-slot below covers the half-hour offset so
+            # the feed gets one piece every 30 min (article on :00,
+            # carousel on :30).
+            "schedule": "0 * * * *",
             "prompt": article_slot,
+        },
+        {
+            "name": "zeus-content-carousel-slot",
+            # Hourly on the half = 24×/day, offset 30 min from
+            # article-slot so the two cadences interleave (article :00,
+            # carousel :30). 4-slide portrait carousels.
+            "schedule": "30 * * * *",
+            "prompt": carousel_slot,
         },
         {
             "name": "zeus-content-ideas-ingest",
