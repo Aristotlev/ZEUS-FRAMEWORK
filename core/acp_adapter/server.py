@@ -776,7 +776,7 @@ class HermesACPAgent(acp.Agent):
             return f"Compression failed: {e}"
 
     def _cmd_version(self, args: str, state: SessionState) -> str:
-        return f"Hermes Agent v{HERMES_VERSION}"
+        return f"Zeus v{HERMES_VERSION}"
 
     # ---- Model switching (ACP protocol method) -------------------------------
 

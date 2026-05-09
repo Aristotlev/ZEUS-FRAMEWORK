@@ -1,5 +1,5 @@
 """
-Hermes CLI - Unified command-line interface for Hermes Agent.
+Zeus CLI - Unified command-line interface for Zeus Agent.
 
 Provides subcommands for:
 - hermes chat          - Interactive chat (same as ./hermes)
