@@ -257,8 +257,12 @@ def _build_jobs(niche: List[str]):
     return [
         {
             "name": "zeus-content-article-slot",
-            # Every 2h on the hour (00,02,04,…,22 UTC = 12×/day).
-            "schedule": "0 */2 * * *",
+            # Every 6h (00, 06, 12, 18 UTC = 4×/day). Publer's trial plan
+            # silently throttles non-Twitter publishes to ~4/day/platform —
+            # any 12×/day cadence had 8 of those posts shadow-dropped on
+            # FB/IG/LI/TT/YT and the matching gen costs (gpt-image-2 + LLM)
+            # were burned for nothing. 4×/day matches the throttle ceiling.
+            "schedule": "0 */6 * * *",
             "prompt": article_slot,
         },
         {
