@@ -257,12 +257,11 @@ def _build_jobs(niche: List[str]):
     return [
         {
             "name": "zeus-content-article-slot",
-            # Every 6h (00, 06, 12, 18 UTC = 4×/day). Publer's trial plan
-            # silently throttles non-Twitter publishes to ~4/day/platform —
-            # any 12×/day cadence had 8 of those posts shadow-dropped on
-            # FB/IG/LI/TT/YT and the matching gen costs (gpt-image-2 + LLM)
-            # were burned for nothing. 4×/day matches the throttle ceiling.
-            "schedule": "0 */6 * * *",
+            # Every 2h on the hour = 12×/day. Publer is on the maxed-out
+            # Business plan as of 2026-05-09, so the trial throttle that
+            # capped non-Twitter platforms at ~4/day/platform is gone —
+            # FB/IG/LI/TT/YT all accept the full 12-post cadence now.
+            "schedule": "0 */2 * * *",
             "prompt": article_slot,
         },
         {
@@ -276,12 +275,10 @@ def _build_jobs(niche: List[str]):
         {
             "name": "zeus-content-publish-ready",
             # Every 10 min. Drains any archive rows the user manually flipped
-            # to "Ready to Publish" — the only automated recovery path for
-            # posts that Publer's trial throttle silently dropped (no API
-            # error fires, watcher can't auto-detect). Also keeps the
-            # publish_watcher daemon alive (idempotent supervisor restart).
-            # Exits silently on empty queue, so 144 ticks/day at near-zero
-            # cost is acceptable.
+            # to "Ready to Publish" in Notion — the supported manual-publish
+            # path. Also keeps the publish_watcher daemon alive (idempotent
+            # supervisor restart). Exits silently on empty queue, so 144
+            # ticks/day at near-zero cost is acceptable.
             "schedule": "*/10 * * * *",
             "prompt": publish_ready,
         },
