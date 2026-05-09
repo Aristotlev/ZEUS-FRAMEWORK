@@ -250,9 +250,9 @@ def _build_jobs(niche: List[str]):
     #     paced, not time-sensitive.
     # publish_watcher (the daemon, NOT a cron) handles permalink
     # resolution every 30s in-memory; it's started by the entrypoint via
-    # watcher_supervisor.sh and self-respawns. carousel_slot, publish_ready,
-    # daily_crawl stay defined above for easy re-enable.
-    _ = (carousel_slot, publish_ready, daily_crawl)  # keep refs
+    # watcher_supervisor.sh and self-respawns. carousel_slot and daily_crawl
+    # stay defined above for easy re-enable.
+    _ = (carousel_slot, daily_crawl)  # keep refs
 
     return [
         {
@@ -272,6 +272,18 @@ def _build_jobs(niche: List[str]):
             # empty queue — zero cost when nothing to do.
             "schedule": "0 6 * * *",
             "prompt": notion_ideas,
+        },
+        {
+            "name": "zeus-content-publish-ready",
+            # Every 10 min. Drains any archive rows the user manually flipped
+            # to "Ready to Publish" — the only automated recovery path for
+            # posts that Publer's trial throttle silently dropped (no API
+            # error fires, watcher can't auto-detect). Also keeps the
+            # publish_watcher daemon alive (idempotent supervisor restart).
+            # Exits silently on empty queue, so 144 ticks/day at near-zero
+            # cost is acceptable.
+            "schedule": "*/10 * * * *",
+            "prompt": publish_ready,
         },
         {
             "name": "zeus-content-weekly-analytics",
