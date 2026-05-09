@@ -50,5 +50,8 @@ nohup bash -c "
 " > "$LOG_FILE" 2>&1 &
 
 SUPERVISOR_PID=$!
+# rm before write: a stale pid file owned by root (from a prior root-mode run)
+# can block the hermes-uid `>` redirect even though the parent dir is hermes-owned.
+rm -f "$PID_FILE" 2>/dev/null || true
 echo "$SUPERVISOR_PID" > "$PID_FILE"
 echo "watcher supervisor started (pid=$SUPERVISOR_PID, log=$LOG_FILE)"
