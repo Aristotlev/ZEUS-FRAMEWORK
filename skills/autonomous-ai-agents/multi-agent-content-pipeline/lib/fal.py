@@ -263,6 +263,82 @@ def generate_video_kling(
     return url, cost
 
 
+def generate_video_kling_i2v(
+    prompt: str,
+    image_url: str,
+    aspect_ratio: Literal["9:16", "16:9", "1:1"] = "9:16",
+    duration_s: int = 5,
+    negative_prompt: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> tuple[str, float]:
+    """
+    Kling 2.5 Turbo Pro image-to-video. Used when the user supplies a
+    starting frame (e.g. an uploaded photo from the Notion ideas DB) and
+    we want the video to begin from that exact frame instead of pure
+    text-to-video. Pricing matches the text-to-video variant.
+
+    `image_url` must be reachable by fal — pass either an https URL or
+    a fal-hosted upload (use `upload_local_file` for local paths).
+    Returns (video_url, cost_usd).
+    """
+    client = _client()
+    arguments: dict = {
+        "prompt": prompt,
+        "image_url": image_url,
+        "aspect_ratio": aspect_ratio,
+        "duration": str(duration_s),
+    }
+    if negative_prompt:
+        arguments["negative_prompt"] = negative_prompt
+    log.info(
+        f"fal video (Kling i2v): {aspect_ratio} {duration_s}s -- {prompt[:60]} "
+        f"keyframe={image_url[:60]}..."
+    )
+    result = client.subscribe(
+        "fal-ai/kling-video/v2.5-turbo/pro/image-to-video",
+        arguments=arguments, client_timeout=600,
+    )
+    video = result.get("video") if isinstance(result, dict) else None
+    url = video.get("url") if isinstance(video, dict) else None
+    if not url:
+        raise FalError(f"Kling i2v returned no video: {result}")
+    actual_cost, _ = _extract_fal_cost(result if isinstance(result, dict) else {})
+    if actual_cost is not None:
+        cost, cost_source = actual_cost, "actual"
+    else:
+        cost = kling_cost(duration_s)
+        cost_source = "estimate"
+    _log_fal_call(
+        run_id=run_id,
+        model="kling-v2.5-turbo-pro-i2v",
+        request_id=(result.get("request_id") if isinstance(result, dict) else None),
+        declared_cost_usd=cost,
+        cost_source=cost_source,
+        inputs={"aspect_ratio": aspect_ratio, "duration_s": duration_s, "prompt_excerpt": prompt[:200], "image_url": image_url[:200]},
+        response_excerpt={k: result.get(k) for k in ("metrics", "pricing", "cost") if isinstance(result, dict) and k in result},
+    )
+    return url, cost
+
+
+def upload_local_file(local_path: str) -> str:
+    """Upload a local file to fal's CDN and return the resulting URL.
+    Used to feed user-uploaded images into image-to-video / image-to-image
+    flows that require an http(s) URL fal can fetch."""
+    client = _client()
+    try:
+        return client.upload_file(local_path)
+    except AttributeError:
+        # Older fal-client versions exposed it as upload_file_async or via
+        # a sync wrapper; fall back through known shapes.
+        if hasattr(client, "upload_file_async"):
+            import asyncio
+            return asyncio.run(client.upload_file_async(local_path))
+        raise FalError(
+            f"fal-client doesn't expose upload_file (version too old). "
+            f"Upgrade with: pip install -U fal-client"
+        )
+
+
 def generate_music(
     prompt: str,
     duration_s: int = 30,

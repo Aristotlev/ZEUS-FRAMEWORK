@@ -148,6 +148,27 @@ def _checkbox(prop: dict | None) -> bool:
     return bool(prop and prop.get("type") == "checkbox" and prop.get("checkbox"))
 
 
+def _files(prop: dict | None) -> list[tuple[str, str]]:
+    """Read a Notion 'files' property. Returns [(name, url), ...].
+
+    Handles both Notion-hosted files (signed S3 URL with expiry) and
+    external links. Caller is responsible for downloading promptly —
+    Notion's signed URLs expire ~1h after the row is read.
+    """
+    if not prop or prop.get("type") != "files":
+        return []
+    out: list[tuple[str, str]] = []
+    for entry in prop.get("files") or []:
+        name = entry.get("name") or "file"
+        if entry.get("type") == "file":
+            url = ((entry.get("file") or {}).get("url") or "").strip()
+        else:
+            url = ((entry.get("external") or {}).get("url") or "").strip()
+        if url:
+            out.append((name, url))
+    return out
+
+
 def _number(prop: dict | None) -> Optional[float]:
     if not prop or prop.get("type") != "number":
         return None
@@ -326,6 +347,113 @@ def _distill(
 # ---------------------------------------------------------------------------
 # Per-idea processing
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# File / photo / PDF attachment support — drop a JPG/PNG into the row and we
+# use it as the post's hero image (skip image generation, $0). Drop a PDF and
+# we extract the text and treat it as the source body when Source is empty
+# (or as additional context when Source is set). Other filetypes are noted
+# in logs but otherwise ignored — explicitly fall through to the URL/Text
+# source path so the row still produces something.
+# ---------------------------------------------------------------------------
+_IMAGE_EXTS = {"jpg", "jpeg", "png", "webp", "gif"}
+_VIDEO_EXTS = {"mp4", "mov", "webm", "m4v"}
+_PDF_EXTS = {"pdf"}
+
+
+def _ext_from_name_or_url(name: str, url: str) -> str:
+    src = name or url
+    # Notion signed URLs end with ?X-Amz-... so split off the query first.
+    src = src.split("?", 1)[0]
+    return src.rsplit(".", 1)[-1].lower() if "." in src else ""
+
+
+def _download_attachment(url: str, dest: pathlib.Path) -> None:
+    r = requests.get(url, timeout=30, allow_redirects=True)
+    r.raise_for_status()
+    dest.write_bytes(r.content)
+
+
+def _extract_pdf_text(path: pathlib.Path) -> str:
+    """Best-effort PDF text extraction. Returns '' if pypdf isn't installed
+    or the PDF is image-only. Caller treats empty as 'no usable text'."""
+    try:
+        import pypdf  # type: ignore
+    except ImportError:
+        log.warning(
+            f"pdf attachment {path.name}: pypdf not installed — "
+            f"`/opt/hermes/.venv/bin/python -m pip install pypdf` to enable. "
+            f"Skipping text extraction."
+        )
+        return ""
+    try:
+        reader = pypdf.PdfReader(str(path))
+        chunks = []
+        for page in reader.pages:
+            t = (page.extract_text() or "").strip()
+            if t:
+                chunks.append(t)
+        return ("\n\n".join(chunks)).strip()
+    except Exception as e:
+        log.warning(f"pdf attachment {path.name}: extract failed ({e})")
+        return ""
+
+
+def _ingest_attachments(
+    files: list[tuple[str, str]], dest_dir: pathlib.Path,
+) -> tuple[list, "Optional[Any]", str, list[str]]:
+    """Download every attached file to ``dest_dir`` and split by kind.
+
+    Returns:
+      images: list[GeneratedAsset]   — populated piece.images entries (cost 0)
+      video: Optional[GeneratedAsset] — first attached .mp4/.mov/etc, if any
+      pdf_text: str                  — concatenated extracted PDF body text
+      skipped: list[str]             — filenames we couldn't use (logged in Notes)
+    """
+    from lib import GeneratedAsset
+
+    images: list = []
+    video = None
+    pdf_chunks: list[str] = []
+    skipped: list[str] = []
+    for idx, (name, url) in enumerate(files, start=1):
+        ext = _ext_from_name_or_url(name, url)
+        safe_name = "".join(c for c in name if c.isalnum() or c in "._-") or f"upload_{idx}"
+        local = dest_dir / f"upload_{idx}_{safe_name}"
+        try:
+            _download_attachment(url, local)
+        except Exception as e:
+            log.warning(f"  download failed for {name!r}: {e}")
+            skipped.append(f"{name} (download failed)")
+            continue
+        if ext in _IMAGE_EXTS:
+            images.append(GeneratedAsset(
+                url=url, kind="image", model="user_upload",
+                cost_usd=0.0, local_path=str(local),
+            ))
+            log.info(f"  attachment image -> {local.name}")
+        elif ext in _VIDEO_EXTS:
+            if video is not None:
+                # Only one video per piece — extras are noise.
+                skipped.append(f"{name} (duplicate video; only first is used)")
+                continue
+            video = GeneratedAsset(
+                url=url, kind="video", model="user_upload",
+                cost_usd=0.0, local_path=str(local),
+            )
+            log.info(f"  attachment video -> {local.name}")
+        elif ext in _PDF_EXTS:
+            text = _extract_pdf_text(local)
+            if text:
+                pdf_chunks.append(text)
+                log.info(f"  attachment pdf  -> {local.name} ({len(text)}c text)")
+            else:
+                skipped.append(f"{name} (pdf had no extractable text)")
+        else:
+            skipped.append(f"{name} (unsupported type .{ext})")
+            log.info(f"  attachment skipped: {name} (unsupported .{ext})")
+    return images, video, "\n\n".join(pdf_chunks).strip(), skipped
+
+
 def _resolve_content_type(props: dict, source_type: str) -> ContentType:
     label = _plain(props.get("Target Type"))
     if label and label != "Auto" and label in CONTENT_TYPE_FROM_LABEL:
@@ -349,39 +477,129 @@ def _resolve_source(raw_source: str, props: dict) -> tuple[ExtractedIdea, str]:
 
 
 def _compile_idea(archive: NotionArchive, page: dict) -> ContentPiece:
-    """End-to-end: extract → distill → archive draft → generate media → patch assets.
+    """End-to-end: download attachments → extract → distill → archive draft →
+    generate media (filling around user uploads) → patch assets.
+
+    Inputs the row may carry, in priority order:
+      1. **Files** (images / videos / PDFs)  — supersede generation:
+         - Image attached → used as the post's hero / first slide / video
+           keyframe (depending on Target Type). $0 to use vs $0.04+ to gen.
+         - Video attached → used directly, skipping Kling text-to-video.
+         - PDF attached → text extracted and used as Source body when the
+           text Source field is empty (or appended to Notes for context).
+      2. **Source** field (URL / YouTube / Text) — the topic seed.
+      3. **Notes** field — extra context the LLM honors during distillation.
 
     Never raises after the archive row exists — partial-failure pieces come
     back with status="media_partial" or "failed" so the caller can still
     record the cost row + email rather than losing the spend.
     """
+    from uuid import uuid4
+
     props = page.get("properties") or {}
     raw_source = _plain(props.get("Source"))
-    if not raw_source:
-        raise ValueError("Source field is empty — paste a URL, YouTube link, or topic text")
     notes = _plain(props.get("Notes"))
+    files = _files(props.get("Files"))
 
-    extracted, source_kind = _resolve_source(raw_source, props)
-    log.info(f"  extracted: type={extracted.source_type} title={extracted.title[:60]!r} excerpt={len(extracted.excerpt)}c")
+    # Pre-create the artifact dir using a placeholder run_id so we can
+    # download attachments BEFORE the LLM call that decides the topic.
+    # We pass this same run_id to the ContentPiece below so the dir is
+    # consistent end-to-end.
+    run_id = uuid4().hex[:12]
+    pending_dir = pipeline_test.ARTIFACT_ROOT / f"{run_id}_ingest_pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+
+    upload_images, upload_video, pdf_text, skipped = ([], None, "", [])
+    if files:
+        log.info(f"  attachments: {len(files)} file(s) to process")
+        upload_images, upload_video, pdf_text, skipped = _ingest_attachments(files, pending_dir)
+
+    # If no Source text but we have PDF text, the PDF IS the source. If both
+    # exist, fold the PDF into Notes so the distiller still sees it.
+    if not raw_source and pdf_text:
+        raw_source = pdf_text
+        # Force-classify as Text so _resolve_source doesn't try to fetch a URL.
+        forced_source_type = "Text"
+    else:
+        forced_source_type = _plain(props.get("Source Type"))
+        if pdf_text:
+            notes = (notes + "\n\n[PDF attachment]\n" + pdf_text).strip()
+
+    if not raw_source:
+        raise ValueError(
+            "row has no Source text and no PDF attachment to derive a topic from — "
+            "paste a URL, YouTube link, or topic text into Source, or attach a PDF"
+        )
+
+    # Hand a synthetic props dict into _resolve_source so PDF-as-source
+    # gets treated as forced Text without mutating the original page object.
+    resolved_props = dict(props)
+    if forced_source_type:
+        resolved_props["Source Type"] = {"type": "select", "select": {"name": forced_source_type}}
+
+    extracted, source_kind = _resolve_source(raw_source, resolved_props)
+    log.info(
+        f"  extracted: type={extracted.source_type} "
+        f"title={extracted.title[:60]!r} excerpt={len(extracted.excerpt)}c"
+    )
 
     content_type = _resolve_content_type(props, source_kind)
     log.info(f"  target type: {content_type.value}")
 
     topic, title, body, distill_cost, distill_source = _distill(extracted, content_type, notes)
-    log.info(f"  distilled -> topic='{topic}' title='{title}' body={len(body)}c (cost ${distill_cost:.5f})")
+    log.info(
+        f"  distilled -> topic='{topic}' title='{title}' "
+        f"body={len(body)}c (cost ${distill_cost:.5f})"
+    )
 
     piece = ContentPiece(
         content_type=content_type,
         title=title,
         body=body,
         topic=topic,
+        run_id=run_id,
     )
     piece.add_cost(pipeline_test.ORCHESTRATOR_MODEL, distill_cost, kind="text", source=distill_source)
 
-    # Stable artifact dir before any paid call (memory: never /tmp).
+    # Stable artifact dir under the topic name. Move attachments from the
+    # pending dir into the canonical one so archive() picks them up.
     artifact_dir = pipeline_test.ARTIFACT_ROOT / f"{piece.run_id}_{pipeline_test._safe_topic(piece.topic)}"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     piece.local_artifact_dir = str(artifact_dir)
+
+    def _move_into_artifact(asset) -> None:
+        if not asset or not asset.local_path:
+            return
+        src = pathlib.Path(asset.local_path)
+        if not src.exists():
+            return
+        dest = artifact_dir / src.name
+        try:
+            src.rename(dest)
+        except OSError:
+            dest.write_bytes(src.read_bytes())
+            try: src.unlink()
+            except OSError: pass
+        asset.local_path = str(dest)
+
+    for img in upload_images:
+        _move_into_artifact(img)
+    _move_into_artifact(upload_video)
+    try: pending_dir.rmdir()
+    except OSError: pass
+
+    # Wire user uploads onto the piece BEFORE archive + generate_media_for.
+    # The generators (post-update) skip phases that already have assets.
+    piece.images.extend(upload_images)
+    if upload_video:
+        piece.video = upload_video
+    if upload_images or upload_video:
+        log.info(
+            f"  using uploads: images={len(upload_images)} "
+            f"video={'yes' if upload_video else 'no'} (skips matching gen phases)"
+        )
+    if skipped:
+        log.info(f"  skipped uploads: {skipped}")
 
     # Archive EARLY so any media spend lands in Notion even if we crash.
     archive.archive(piece)

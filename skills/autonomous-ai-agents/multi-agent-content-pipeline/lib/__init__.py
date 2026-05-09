@@ -12,7 +12,9 @@ from .fal import (
     FalError,
     generate_image,
     generate_video_kling,
+    generate_video_kling_i2v,
     generate_music,
+    upload_local_file as fal_upload_local_file,
     download,
     kling_cost,
 )
@@ -60,6 +62,8 @@ __all__ = [
     "FalError",
     "generate_image",
     "generate_video_kling",
+    "generate_video_kling_i2v",
+    "fal_upload_local_file",
     "generate_music",
     "download",
     "kling_cost",

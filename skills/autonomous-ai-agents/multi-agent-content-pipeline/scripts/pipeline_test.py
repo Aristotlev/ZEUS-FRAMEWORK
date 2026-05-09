@@ -1028,6 +1028,12 @@ def generate_media_for(
 
 
 def _gen_article_image(piece: ContentPiece, out_dir: pathlib.Path, quality_override: Optional[str] = None) -> None:
+    # User-supplied hero (from the ideas DB Files column) supersedes
+    # generation — saves the $0.04-0.16 image call and uses the exact
+    # photo the user wants on the post.
+    if any(img.local_path for img in piece.images):
+        log.info(f"  hero image: using user upload ({piece.images[0].local_path}) — skipping fal")
+        return
     w, h, q = IMAGE_SPECS[ContentType.ARTICLE]
     if quality_override:
         q = quality_override
@@ -1082,6 +1088,23 @@ def _gen_carousel_images(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     slides = max(3, min(5, slides))
+    # User uploads (from the ideas DB Files column) take the first slots
+    # — uploaded slide 1 is slide 1, etc. We only generate the remaining.
+    # If the user supplies >= `slides` images, we generate nothing.
+    pre_uploaded = [img for img in piece.images if img.local_path]
+    if len(pre_uploaded) >= slides:
+        log.info(
+            f"  carousel: using {len(pre_uploaded)} user-uploaded slide(s); "
+            f"skipping all fal generation"
+        )
+        # Cap to the requested slide count — extras are dropped.
+        del piece.images[slides:]
+        return
+    if pre_uploaded:
+        log.info(
+            f"  carousel: using {len(pre_uploaded)} user-uploaded slide(s); "
+            f"generating remaining {slides - len(pre_uploaded)} via fal"
+        )
     slide_prompts = _carousel_slide_prompts(piece, slides)
     w, h, q = IMAGE_SPECS[ContentType.CAROUSEL]
     if quality_override:
@@ -1109,14 +1132,17 @@ def _gen_carousel_images(
         assert last_err is not None
         raise last_err
 
-    # Slot the slides into a fixed-size list so insertion order matches slide
-    # order regardless of completion order. Critical: slide 1 should be the
-    # hook visual, slide N the closer.
+    # Slot generated slides into a list keyed by slide index. Pre-uploaded
+    # slots are already on piece.images (in order); only indices >= K need
+    # generation. Order (slide 1 hook → slide N closer) is preserved by
+    # appending in slide-index order.
+    K = len(pre_uploaded)
     results: list[Optional[GeneratedAsset]] = [None] * slides
     first_error: Optional[BaseException] = None
 
-    with ThreadPoolExecutor(max_workers=slides) as pool:
-        futures = {pool.submit(_gen_one, i, sp): i for i, sp in enumerate(slide_prompts)}
+    to_generate = [(i, sp) for i, sp in enumerate(slide_prompts) if i >= K]
+    with ThreadPoolExecutor(max_workers=max(1, len(to_generate))) as pool:
+        futures = {pool.submit(_gen_one, i, sp): i for i, sp in to_generate}
         for fut in as_completed(futures):
             try:
                 idx, asset, cost = fut.result()
@@ -1129,10 +1155,11 @@ def _gen_carousel_images(
             piece.add_cost("gpt-image-2", cost, kind="image", source="estimate")
             ledger_checkpoint(piece, f"carousel_slide_{idx + 1}_generated")
 
-    # Append in order; skip empty slots from failed slides.
-    for asset in results:
-        if asset is not None:
-            piece.images.append(asset)
+    # Append generated slides in order, skipping empty slots from failed
+    # slides. User uploads (indices < K) are already on piece.images.
+    for i in range(K, slides):
+        if results[i] is not None:
+            piece.images.append(results[i])
 
     # Cheap byte-level dedupe — fal occasionally serves the same cached image
     # for similar prompts, which would ship a carousel with 2 identical slides.
@@ -1222,28 +1249,66 @@ def _carousel_slide_prompts(piece: ContentPiece, slides: int) -> list[str]:
 
 
 def _gen_video(piece: ContentPiece, out_dir: pathlib.Path, aspect: str, duration: int) -> None:
-    prompt = piece.body[:800]
-    url, cost = generate_video_kling(prompt, aspect_ratio=aspect, duration_s=duration, run_id=piece.run_id)
-    local = download(url, str(out_dir / "video.mp4"))
     width, height = (1080, 1920) if aspect == "9:16" else (1920, 1080)
-    piece.video = GeneratedAsset(
-        url=url,
-        kind="video",
-        width=width,
-        height=height,
-        duration_s=duration,
-        model="kling-v2.5-turbo-pro",
-        cost_usd=cost,
-        local_path=local,
-    )
-    piece.add_cost("kling-v2.5-turbo-pro", cost, kind="video", source="estimate")
-    ledger_checkpoint(piece, "video_generated")
+    prompt = piece.body[:800]
+
+    # User-supplied video (uploaded to the ideas DB Files column) wins
+    # outright — no generation needed, just use the local file.
+    if piece.video and piece.video.local_path:
+        log.info(f"  video: using user upload ({piece.video.local_path}) — skipping Kling")
+        # Only audio mixing still applies, fall through to it below.
+    elif any(img.local_path for img in piece.images):
+        # User-supplied keyframe → image-to-video Kling. Picks the first
+        # uploaded image as the starting frame; fal needs an http URL so
+        # we upload the local file to fal first.
+        from lib import generate_video_kling_i2v, fal_upload_local_file
+        keyframe = piece.images[0]
+        log.info(f"  video: using user image as keyframe ({keyframe.local_path}) -> Kling i2v")
+        try:
+            image_url = fal_upload_local_file(keyframe.local_path)
+        except Exception as e:
+            log.warning(f"  fal upload failed ({e}); falling back to text-to-video")
+            image_url = None
+        if image_url:
+            url, cost = generate_video_kling_i2v(
+                prompt, image_url, aspect_ratio=aspect,
+                duration_s=duration, run_id=piece.run_id,
+            )
+            local = download(url, str(out_dir / "video.mp4"))
+            piece.video = GeneratedAsset(
+                url=url, kind="video", width=width, height=height,
+                duration_s=duration, model="kling-v2.5-turbo-pro-i2v",
+                cost_usd=cost, local_path=local,
+            )
+            piece.add_cost("kling-v2.5-turbo-pro-i2v", cost, kind="video", source="estimate")
+            ledger_checkpoint(piece, "video_generated_i2v")
+        else:
+            url, cost = generate_video_kling(prompt, aspect_ratio=aspect, duration_s=duration, run_id=piece.run_id)
+            local = download(url, str(out_dir / "video.mp4"))
+            piece.video = GeneratedAsset(
+                url=url, kind="video", width=width, height=height,
+                duration_s=duration, model="kling-v2.5-turbo-pro",
+                cost_usd=cost, local_path=local,
+            )
+            piece.add_cost("kling-v2.5-turbo-pro", cost, kind="video", source="estimate")
+            ledger_checkpoint(piece, "video_generated")
+    else:
+        url, cost = generate_video_kling(prompt, aspect_ratio=aspect, duration_s=duration, run_id=piece.run_id)
+        local = download(url, str(out_dir / "video.mp4"))
+        piece.video = GeneratedAsset(
+            url=url, kind="video", width=width, height=height,
+            duration_s=duration, model="kling-v2.5-turbo-pro",
+            cost_usd=cost, local_path=local,
+        )
+        piece.add_cost("kling-v2.5-turbo-pro", cost, kind="video", source="estimate")
+        ledger_checkpoint(piece, "video_generated")
 
     if piece.audio_mode:
+        local_video = piece.video.local_path  # works for all branches above
         final_path, audio_costs = mix_audio_for_video(
-            piece, local, str(out_dir), narration_text=piece.body,
+            piece, local_video, str(out_dir), narration_text=piece.body,
         )
-        if final_path != local:
+        if final_path != local_video:
             piece.video.local_path = final_path
         for model, model_cost in audio_costs.items():
             # fish.audio bills per character — char count IS the actual billing

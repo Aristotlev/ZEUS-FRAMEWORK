@@ -74,6 +74,11 @@ WANTED_PROPERTIES: dict[str, dict] = {
     "Notes": {"rich_text": {}},
     "Compiled Page": {"url": {}},
     "Auto Publish": {"checkbox": {}},
+    # Drop images / PDFs / docs here. Images attached are used as the post's
+    # hero/slide images directly (skips fal generation). PDFs are text-
+    # extracted and used as the source body when Source is empty. Other
+    # filetypes are listed in Notes and otherwise ignored.
+    "Files": {"files": {}},
     # Per-row media knobs. Empty cell -> ingester defaults (4 slides, 5s video).
     "Slides": {"number": {}},
     "Video Duration": {"number": {}},
