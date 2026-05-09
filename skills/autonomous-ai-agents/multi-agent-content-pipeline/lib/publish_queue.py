@@ -185,7 +185,22 @@ def hydrate(row: dict) -> tuple[ContentPiece, dict]:
     return piece, meta
 
 
+_HARD_AGE_HOURS = 24
+
 def is_past_deadline(row: dict, now: Optional[datetime] = None) -> bool:
+    """True if either (a) the row's stored deadline has elapsed, or (b) the
+    row is older than _HARD_AGE_HOURS regardless of stored deadline. The
+    age fallback catches rows enqueued by older code that wrote a multi-day
+    deadline (we found 7 May-7/8 rows with deadlines pinned 3-4 days out
+    that sat in the queue for 37-55h with no path to finalize)."""
+    n = now or datetime.now(timezone.utc)
+    enq_s = row.get("enqueued_at")
+    if enq_s:
+        try:
+            if (n - datetime.fromisoformat(enq_s)).total_seconds() > _HARD_AGE_HOURS * 3600:
+                return True
+        except ValueError:
+            pass
     deadline_s = row.get("deadline")
     if not deadline_s:
         return False
@@ -193,4 +208,4 @@ def is_past_deadline(row: dict, now: Optional[datetime] = None) -> bool:
         deadline = datetime.fromisoformat(deadline_s)
     except ValueError:
         return False
-    return (now or datetime.now(timezone.utc)) > deadline
+    return n > deadline
