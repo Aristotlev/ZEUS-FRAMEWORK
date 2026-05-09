@@ -30,9 +30,12 @@ Multi-provider model support is inherited from Hermes (OpenRouter, Anthropic, Op
 | **🖥️  Terminal-native** | The agent runs in your shell. No browser, no cloud panel. CLI, TUI, or messaging-gateway. |
 | **🧠  4-layer memory** | In-context → episodic → **semantic (pgvector)** → procedural (skills). Every layer swappable. |
 | **🎬  Content automation** | One command turns a topic into Article / LongArticle / Carousel / ShortVideo / LongVideo across 7 platforms — fal.ai images, Kling video, fish.audio TTS, Notion archive, Publer distribution. |
-| **⏰  Idempotent crons** | Three shipped jobs research + draft + publish on schedule. Niche-agnostic. Re-run setup to update; never duplicates. |
+| **📥  Notion drop-anything inbox** | Paste a URL, file, PDF, or video into a Notion DB row → Zeus auto-classifies, drafts, and ships it. |
+| **⏰  Idempotent crons** | Four shipped jobs research, draft, publish, and report on schedule. Niche-agnostic. Re-run setup to update; never duplicates. |
+| **📡  Self-healing publish daemon** | `publish_watcher` polls Publer for permalinks, injects them into Notion + email rollups, self-respawns on crash. |
+| **📊  Weekly analytics** | Sunday rollup pulls Publer post-insights, asks an LLM for "what's working / why", appends to a Notion analytics DB + emails the report. |
 | **☁️  Distributed compute** | OpenClaw runs heavy workloads on Oracle ARM (Ampere A1) free-tier instances. Zeus delegates and returns. |
-| **🏗️  Production-ready** | Single-script Hetzner deploy with auto-TLS (Caddy), daily backups, status dashboard, remote trigger endpoint. |
+| **🏗️  Production-ready** | Single-script Hetzner deploy with auto-TLS (Caddy), daily backups, status dashboard, remote trigger endpoint, GitHub Actions auto-deploy on push to main. |
 | **🛡️  Honest cost tracking** | Every run, every model, every dollar appended to a JSONL ledger. Email summaries with 24h / 7d / 30d / all-time rollups. No surprises. |
 
 ## Quick Install
@@ -76,7 +79,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Aristotlev/ZEUS-FRAMEWORK/ma
 | `zeus cron start` | Run the cron daemon (foreground) |
 | `zeus cron daemon` | Run the cron daemon (background) |
 | `zeus cron list` | List installed cron jobs |
-| `python scripts/setup_content_cron.py` | Install the three content cron jobs for your niche |
+| `python scripts/setup_content_cron.py` | Install the four content cron jobs for your niche (idempotent) |
 | `python skills/.../scripts/pipeline_test.py --type <T> --topic "<...>"` | Run the content pipeline manually for a single piece |
 
 ## Documentation
@@ -87,7 +90,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Aristotlev/ZEUS-FRAMEWORK/ma
 | [Architecture](docs/architecture.md) | Top-level layout: `core/`, `stack/`, `plugins/`, `skills/`, `openclaw/` |
 | [Memory model](docs/memory.md) | The 4 memory layers, swapping any of them |
 | [Content pipeline](docs/content-pipeline.md) | The 5-type content automation system + cost analysis |
-| [Cron](docs/cron.md) | Three idempotent content cron jobs and how to configure your niche |
+| [Cron](docs/cron.md) | The four idempotent content cron jobs and how to configure your niche |
 | [Skills](docs/skills.md) | The 98+ procedural skills shipped with Zeus, by domain |
 | [pgvector setup](docs/pgvector.md) | User-owned PostgreSQL 16 + pgvector setup (no sudo) |
 | [OpenClaw](docs/openclaw.md) | Distributed compute on Oracle ARM nodes |
@@ -108,17 +111,25 @@ Detailed: [docs/memory.md](docs/memory.md).
 
 ## Content Automation at a glance
 
-Generate professional content across **Twitter, Instagram, LinkedIn, TikTok, YouTube, Reddit, Facebook** from a single command. Every run archives to Notion **before** any external API spend, downloads media locally, appends to a persistent cost ledger, and emails a summary with post links + always-on cost rollups.
+Generate professional content across **Twitter, Instagram, LinkedIn, TikTok, YouTube, Reddit, Facebook** from a single command. Every run archives to Notion **before** any external API spend, downloads media locally, appends to a persistent cost ledger, and emails a summary with post permalinks + always-on cost rollups.
 
-| Type | Media | Targets |
-|---|---|---|
-| **Article** | 1 image (1024×1024) | Twitter, IG, LinkedIn, TikTok |
-| **LongArticle** | 1 image + thread | Twitter (thread), IG, LinkedIn, TikTok |
-| **Carousel** | 3–5 portrait slides | Twitter, IG, LinkedIn, TikTok |
-| **ShortVideo** | 1080×1920, <90s | Twitter, IG (reel), LinkedIn, TikTok, YouTube Shorts |
-| **LongVideo** | 1920×1080 | YouTube, Twitter, LinkedIn, Reddit |
+| Type | Media | Targets | Status |
+|---|---|---|---|
+| **Article** | 1 image (1024×1024) | Twitter, IG, LinkedIn, TikTok | ✅ live |
+| **LongArticle** | 1 image + thread | Twitter (thread), IG, LinkedIn, TikTok | ✅ live |
+| **Carousel** | 3–5 portrait slides (1024×1536) | Twitter, IG, LinkedIn, TikTok | ✅ live |
+| **ShortVideo** | 1080×1920, <90s | Twitter, IG (reel), LinkedIn, TikTok, YouTube Shorts | ✅ live |
+| **LongVideo** | 1920×1080 | YouTube, Twitter, LinkedIn, Reddit | ✅ live |
+| **ShortVideoAvatar** | avatar-driven 1080×1920 | same as ShortVideo | 🔧 scaffolded |
+| **LongVideoAvatar** | avatar-driven 1920×1080 | same as LongVideo | 🔧 scaffolded |
 
-Stack: OpenRouter (text) · fal.ai GPT-Image-2 (images) · fal.ai Kling Turbo Pro (video) · fish.audio (TTS) · cassetteai/music-generator (music) · Publer (distribution) · Notion (archive).
+Stack: OpenRouter (text) · fal.ai GPT-Image-2 (images) · fal.ai Kling 2.5 Turbo Pro (video) · fish.audio (TTS) · cassetteai/music-generator (music) · Publer (distribution) · Notion (archive + drop-anything ideas inbox).
+
+Surrounding services that run alongside the pipeline:
+
+- **`publish_watcher`** — long-running daemon, polls Publer every 30s in-memory, resolves permalinks, updates Notion, fires the email rollup. Self-respawns on crash; supervised by the entrypoint.
+- **`ingest_ideas`** — drains the Notion Ideas DB (URLs / YouTube / text / PDFs / photos / videos) into the chosen content type and ships it.
+- **`weekly_analytics`** — Sunday 17:00 UTC pulls last-7-day Publer post insights, generates a "what's working / why" analysis, writes a Notion DB row, and emails the report.
 
 Detailed: [docs/content-pipeline.md](docs/content-pipeline.md).
 
@@ -134,9 +145,18 @@ Browse all: [docs/skills.md](docs/skills.md).
 - **PostgreSQL + pgvector** — L3 semantic memory (1536-dim embeddings)
 - **Mnemosyne** — Memory plugin: circuit breaker, auto-mirror, session summarization
 - **OpenClaw** — Distributed execution on Oracle ARM free-tier nodes
-- **Hermes Agent** — Core engine with 50+ built-in tools
+- **Hermes Agent** — Core engine with 50+ built-in tools, MCP client support, multi-provider routing
 
 Detailed: [docs/architecture.md](docs/architecture.md).
+
+## Deployment
+
+- One-script Hetzner bootstrap (Caddy auto-TLS, daily backups, status dashboard)
+- Docker-Compose stack (Zeus + Redis + PostgreSQL 16 + pgvector)
+- GitHub Actions workflow auto-deploys on push to `main` (SSH + `git pull` + `docker restart zeus-agent`)
+- `cron_catchup.sh` backfills any content slots that the gateway missed during outages
+
+Detailed: [docs/deployment.md](docs/deployment.md).
 
 ## Philosophy
 

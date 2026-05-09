@@ -8,15 +8,22 @@ Override per-run with ``--niche "a,b,c"``.
 Idempotent: removes any existing ``zeus-content-*`` jobs before recreating,
 so re-running this updates the prompts/schedules without duplicating.
 
-Active cron jobs (2026-05-08 — pruned to one stream, will re-expand):
-  1. zeus-content-article-slot   — 12×/day on "0 */2 * * *": generate +
-     post one long-form article on the freshest story.
+Active cron jobs (2026-05-09):
+  1. zeus-content-article-slot       — 12×/day on "0 */2 * * *": auto-pick
+     a fresh past-72h headline, generate + publish one long-form article.
+  2. zeus-content-ideas-ingest       — daily 06:00 UTC: drain Notion Ideas
+     DB into the chosen content type and queue for publish.
+  3. zeus-content-publish-ready      — every 10m: drain rows the user
+     manually flipped to "Ready to Publish"; also keeps publish_watcher
+     alive via watcher_supervisor.sh (no-op when daemon is healthy).
+  4. zeus-content-weekly-analytics   — Sunday 17:00 UTC: weekly Publer
+     post-insight rollup → Notion DB row + email report.
 
-Other job builders (carousel-slot, notion-ideas, publish-ready,
-daily-crawl) are kept in ``_build_jobs`` but excluded from the return
-list. To re-enable any of them, add their dict back to the returned
-list and re-run this script — it nukes existing jobs first, so the
-diff is reflected exactly.
+Inactive job builders (carousel-slot, daily-crawl) remain defined in
+``_build_jobs`` for easy re-enable but are excluded from the returned
+list. To re-enable, add their dict back to the returned list and re-run
+this script — it nukes existing zeus-content-* jobs first, so the diff
+is reflected exactly.
 
 The publish_watcher runs as a self-respawning daemon (started by
 watcher_supervisor.sh from the entrypoint) — polls Publer in-memory

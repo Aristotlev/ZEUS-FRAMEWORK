@@ -1,16 +1,17 @@
 # Content Cron Jobs
 
-Three idempotent cron jobs ship with Zeus. Set your niche once, run the setup script, and Zeus runs the [content pipeline](content-pipeline.md) on schedule.
+Four idempotent cron jobs ship with Zeus. Set your niche once, run the setup script, and Zeus runs the [content pipeline](content-pipeline.md) on schedule.
 
 ## The jobs
 
 | Job | Schedule | What it does |
 |---|---|---|
-| `zeus-content-article-slot` | every 4–6h (04:00 / 08:00 / 12:00 / 17:00 / 21:00 / 00:00 server local) | Research + draft + publish a long-form article on the freshest niche story |
-| `zeus-content-notion-ideas` | daily 07:00 | Process team-submitted ideas from the Notion content database, draft articles, schedule via Publer |
-| `zeus-content-daily-crawl` | daily 06:00 | Crawl the day's headlines across the niche, build a 6-story content brief, queue stories for the day |
+| `zeus-content-article-slot` | every 2h on the hour (12×/day, UTC) | Auto-pick a fresh story (past-72h headline), draft a long-form article, publish across Twitter / IG / LinkedIn / TikTok / Facebook |
+| `zeus-content-ideas-ingest` | daily 06:00 UTC | Drain the Notion Ideas DB — distill each new row (URL / YouTube / text / PDF / photo / video) into the chosen content type and queue for publish |
+| `zeus-content-publish-ready` | every 10 min | Drain any archive rows the user manually flipped to "Ready to Publish" in Notion. Also keeps the `publish_watcher` daemon alive (idempotent supervisor restart) |
+| `zeus-content-weekly-analytics` | Sunday 17:00 UTC | Pull last-7-day Publer post insights, generate a "what's working / why / patterns" analysis, write a row to the Notion Weekly Analytics DB, email the report |
 
-A separate carousel job runs at 00:30 + 12:30 if you have carousel mode enabled.
+`carousel_slot` and `daily_crawl` job builders remain defined in [`scripts/setup_content_cron.py`](../scripts/setup_content_cron.py) for easy re-enable but are not in the active list. Add them back to the returned list and re-run the setup script — it nukes existing `zeus-content-*` jobs first, so the diff is reflected exactly.
 
 ## Setup
 
@@ -36,6 +37,20 @@ A separate carousel job runs at 00:30 + 12:30 if you have carousel mode enabled.
    hermes cron start    # foreground
    hermes cron daemon   # background
    ```
+
+   In production, the entrypoint launches `hermes gateway run` and re-runs `setup_content_cron.py` on every container boot — schedule/prompt edits auto-apply on `git pull && docker restart`.
+
+## The publish_watcher daemon (separate from cron)
+
+`publish_watcher` is a long-running Python daemon — **not a cron job** — that polls Publer every ~30s in-memory, resolves real platform permalinks, updates the Notion archive, and fires the unified email rollup once all platforms report a state.
+
+- Started by the prod entrypoint via `watcher_supervisor.sh`
+- Self-respawns on Python crashes
+- The `publish-ready` cron's first command (`watcher_supervisor.sh`) is a no-op when the daemon is healthy and respawns it if dead
+
+## Catch-up after outages
+
+`scripts/cron_catchup.sh` runs on container boot and fires backfill runs for any content slot whose most recent ledger entry is older than the slot's max gap (e.g. `0 */2 * * *` → max gap 2h, grace 3h). This recovers from gateway crashes or container restarts that spanned a slot boundary.
 
 ## Why a fast model for cron
 
