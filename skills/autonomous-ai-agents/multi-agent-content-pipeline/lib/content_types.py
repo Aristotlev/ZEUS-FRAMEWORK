@@ -1,12 +1,21 @@
 """
 Content type taxonomy for Zeus content pipeline.
 
-Five types:
-  Article      — 1 image + short description (<480 chars), single tweet, 4 platforms
-  LongArticle  — 1 image + long description (550-900+ chars), Twitter thread, 4 platforms
-  Carousel     — 3-5 slide images + long description, 4 platforms (Twitter/IG/LI/TT)
-  ShortVideo   — 1080x1920, <90s, 5 platforms (+YouTube Shorts)
-  LongVideo    — 1920x1080, 4 platforms (YouTube/Twitter/LinkedIn/Reddit)
+Seven types:
+  Article          — 1 image + short description (<480 chars), single tweet, 4 platforms
+  LongArticle      — 1 image + long description (550-900+ chars), Twitter thread, 4 platforms
+  Carousel         — 3-5 slide images + long description, 4 platforms (Twitter/IG/LI/TT)
+  ShortVideo       — 1080x1920, <90s, 5 platforms (+YouTube Shorts)
+  LongVideo        — 1920x1080, 4 platforms (YouTube/Twitter/LinkedIn/Reddit)
+  ShortVideoAvatar — 1080x1920, <90s, talking-head presenter overlay (NOT YET IMPLEMENTED)
+  LongVideoAvatar  — 1920x1080, presenter-led explainer (NOT YET IMPLEMENTED)
+
+The two avatar types are SCAFFOLDED ONLY — provider (Hedra/HeyGen/D-ID/etc.)
+and presenter persona are still TBD. The orchestrator in pipeline_test.py
+raises NotImplementedError if you pass --type short_video_avatar / long_video_avatar
+until the generation pipeline is wired. Keeping the enum + platform map +
+validation rules in place now lets us evolve the rest of the codebase
+(Notion schema, cron, cost ledger) without enum churn later.
 
 ContentPiece is the single dataclass that flows through fal -> Publer -> Notion.
 """
@@ -28,6 +37,9 @@ class ContentType(str, Enum):
     CAROUSEL = "carousel"
     SHORT_VIDEO = "short_video"
     LONG_VIDEO = "long_video"
+    # Scaffold-only — orchestrator NotImplementedError until provider picked.
+    SHORT_VIDEO_AVATAR = "short_video_avatar"
+    LONG_VIDEO_AVATAR = "long_video_avatar"
 
 
 class AudioMode(str, Enum):
@@ -46,6 +58,10 @@ PLATFORMS_BY_TYPE: dict[ContentType, list[str]] = {
     ContentType.CAROUSEL: ["twitter", "instagram", "linkedin", "tiktok", "facebook", "reddit"],
     ContentType.SHORT_VIDEO: ["twitter", "instagram", "linkedin", "tiktok", "youtube", "facebook"],
     ContentType.LONG_VIDEO: ["youtube", "twitter", "linkedin", "reddit"],
+    # Avatar types share platform targets with their non-avatar siblings.
+    # Same dims, same publish flow once the generator lands.
+    ContentType.SHORT_VIDEO_AVATAR: ["twitter", "instagram", "linkedin", "tiktok", "youtube", "facebook"],
+    ContentType.LONG_VIDEO_AVATAR: ["youtube", "twitter", "linkedin", "reddit"],
 }
 
 
@@ -178,5 +194,24 @@ class ContentPiece:
                 if (self.video.width, self.video.height) != (1920, 1080):
                     errors.append(
                         f"Long video must be 1920x1080, got {self.video.width}x{self.video.height}"
+                    )
+        elif ct == ContentType.SHORT_VIDEO_AVATAR:
+            if not self.video:
+                errors.append("Short video avatar requires a video asset")
+            else:
+                if self.video.duration_s is not None and self.video.duration_s >= 90:
+                    errors.append(f"Short video avatar must be <90s, got {self.video.duration_s}s")
+                if self.video.width and self.video.height:
+                    if (self.video.width, self.video.height) != (1080, 1920):
+                        errors.append(
+                            f"Short video avatar must be 1080x1920, got {self.video.width}x{self.video.height}"
+                        )
+        elif ct == ContentType.LONG_VIDEO_AVATAR:
+            if not self.video:
+                errors.append("Long video avatar requires a video asset")
+            elif self.video.width and self.video.height:
+                if (self.video.width, self.video.height) != (1920, 1080):
+                    errors.append(
+                        f"Long video avatar must be 1920x1080, got {self.video.width}x{self.video.height}"
                     )
         return errors

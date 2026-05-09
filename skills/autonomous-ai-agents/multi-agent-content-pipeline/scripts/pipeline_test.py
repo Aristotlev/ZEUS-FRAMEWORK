@@ -1965,6 +1965,14 @@ def main() -> int:
         log.warning(f"--audio-mode only applies to video types, ignoring for {args.type}")
         audio_mode = None
 
+    if args.type in ("short_video_avatar", "long_video_avatar"):
+        log.error(
+            f"--type {args.type} is scaffolded in the taxonomy but the generation "
+            f"pipeline is not yet wired (avatar provider + presenter persona TBD). "
+            f"Pick one of: article, long_article, carousel, short_video, long_video."
+        )
+        return 3
+
     try:
         if args.topic:
             topic = args.topic
