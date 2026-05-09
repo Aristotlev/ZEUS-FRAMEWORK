@@ -149,6 +149,34 @@ def _patch_status(archive: NotionArchive, page_id: str, status_label: str) -> No
         r.raise_for_status()
 
 
+def _already_published(page: dict) -> tuple[bool, str]:
+    """Idempotency check: True if this Notion row was already shipped (or is
+    in flight) on a prior publish call.
+
+    A row whose `Job IDs`, `Posted At`, `Platforms Posted`, or `Post Links`
+    is populated has been through publish() at least once -- re-running
+    would re-upload media and re-schedule on every platform, producing
+    duplicates on whatever platforms succeeded the first time.
+
+    Background: 2026-05-09 18:19 UTC, 7 archive rows from May 7-8 got
+    re-flipped to "Ready to Publish" (likely an unbounded
+    `publish_from_notion --once` from an agent-driven cron). The script
+    happily re-published them, creating 7 sets of new Publer jobs on top
+    of the originals. Returns (True, signal) so the caller can refuse.
+    """
+    props = page.get("properties") or {}
+    if _plain(props.get("Job IDs")).strip():
+        return True, "Job IDs already populated"
+    posted_at = props.get("Posted At") or {}
+    if (posted_at.get("date") or {}).get("start"):
+        return True, "Posted At already set"
+    if _multi_select(props.get("Platforms Posted")):
+        return True, "Platforms Posted non-empty"
+    if _plain(props.get("Post Links")).strip():
+        return True, "Post Links already populated"
+    return False, ""
+
+
 def _query_ready(
     archive: NotionArchive,
     *,
@@ -344,6 +372,19 @@ def _publish_one(archive: NotionArchive, page: dict, *, dry_run: bool) -> Option
         (page.get("properties") or {}).get("Name")
     ) or page_id
     log.info(f"\n--- {title} [{page_id}]")
+
+    already, reason = _already_published(page)
+    if already:
+        log.error(
+            f"  REFUSING to publish {page_id}: {reason}. This row was "
+            f"shipped before -- re-publishing would duplicate posts on "
+            f"every platform that succeeded the first time. Flipping to "
+            f"Failed so it stops being picked up; clear the Posted/Job IDs "
+            f"fields manually if you genuinely want to re-publish."
+        )
+        if not dry_run:
+            _patch_status(archive, page_id, "Failed")
+        return None
 
     if dry_run:
         log.info("  (dry-run) would lock + reconstruct + publish")

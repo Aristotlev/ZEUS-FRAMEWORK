@@ -343,6 +343,9 @@ def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:
     Skipped (returns False) when:
       - retry_count is already at MAX_PUBLISH_RETRIES
       - no images/video have a local_path (artifact gone — can't re-upload)
+      - any platform's existing job_id was accepted by Publer (re-publishing
+        would duplicate live posts; see ARM TikTok dupe 2026-05-09)
+      - any platform has a live post matching this snippet on Publer
       - pipeline_test.publish() raises (e.g. PUBLER_API_KEY suddenly unset)
     """
     attempts = int(meta.get("retry_count") or 0)
@@ -352,6 +355,47 @@ def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:
             f"({MAX_PUBLISH_RETRIES}) reached -- giving up"
         )
         return False
+    # Idempotency guard: distinguish "Publer rejected the schedule"
+    # (FAILED: marker on the job_id) from "Publer accepted but the
+    # watcher couldn't resolve the post" (real id, no _url marker).
+    # _final_status returns "failed" for both when past_deadline + no
+    # confirmed -- but only the first is safe to retry. The second
+    # almost always means the post WENT LIVE and the watcher just
+    # couldn't see it (Publer rate-limit, transient API errors).
+    # Re-publishing in that case duplicates every platform that worked.
+    accepted_jobs = [
+        (plat, jid) for plat, jid in piece.publer_job_ids.items()
+        if not plat.endswith("_url") and jid and not str(jid).startswith("FAILED")
+    ]
+    if accepted_jobs:
+        log.error(
+            f"  run={piece.run_id} ABORTING retry: Publer accepted "
+            f"{len(accepted_jobs)} platform job(s) ({[p for p,_ in accepted_jobs]}) "
+            f"on the original publish -- the watcher couldn't resolve the live "
+            f"post(s), but Publer almost certainly published them. Re-running "
+            f"publish() would duplicate. Finalizing as failed instead."
+        )
+        return False
+    # Last-ditch cross-check: even if every job_id is FAILED:, snippet-match
+    # against Publer's recent posts per account. If a post on this account
+    # already matches this snippet, that platform DID go live -- abort retry.
+    snippet = (piece.body or "")[:60]
+    if snippet:
+        for plat in piece.target_platforms:
+            account = PUBLER_ACCOUNTS.get(plat)
+            if not account:
+                continue
+            try:
+                if _find_publer_post_id(account, snippet):
+                    log.error(
+                        f"  run={piece.run_id} ABORTING retry: Publer already "
+                        f"has a post on {plat} (acct ...{account[-6:]}) matching "
+                        f"this snippet. Likely a stale FAILED marker -- the "
+                        f"original publish actually worked."
+                    )
+                    return False
+            except Exception:
+                pass  # snippet check is best-effort; fall through to retry
     has_local = any(getattr(img, "local_path", None) for img in piece.images) or (
         piece.video and getattr(piece.video, "local_path", None)
     )
