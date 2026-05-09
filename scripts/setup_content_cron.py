@@ -13,9 +13,10 @@ Active cron jobs (2026-05-09):
      a fresh past-72h headline, generate + publish one long-form article.
   2. zeus-content-ideas-ingest       — daily 06:00 UTC: drain Notion Ideas
      DB into the chosen content type and queue for publish.
-  3. zeus-content-publish-ready      — every 10m: drain rows the user
-     manually flipped to "Ready to Publish"; also keeps publish_watcher
-     alive via watcher_supervisor.sh (no-op when daemon is healthy).
+  3. zeus-content-publish-ready      — every 30m: drip-feed ONE row at a
+     time from the "Ready to Publish" queue (FIFO by created_time, capped
+     at 72h freshness). Also keeps publish_watcher alive via
+     watcher_supervisor.sh (no-op when daemon is healthy).
   4. zeus-content-weekly-analytics   — Sunday 17:00 UTC: weekly Publer
      post-insight rollup → Notion DB row + email report.
 
@@ -202,20 +203,20 @@ def _build_jobs(niche: List[str]):
     )
 
     publish_ready = (
-        "Daily safety-net for Notion rows the user flipped to 'Ready to "
-        "Publish' but that the on-demand publish path didn't catch. ALSO "
-        "ensures the publish_watcher daemon is alive (faster permalink "
-        "resolution than cron, and zero agent overhead for the 99% of "
-        "ticks that previously found nothing to do).\n\n"
+        "Drip-feed one piece per fire from the 'Ready to Publish' Notion "
+        "queue (FIFO by created_time, capped at 72h freshness). The script "
+        "publishes AT MOST ONE row per invocation — running it more often "
+        "than every 30 min wastes Publer slot allocation. ALSO ensures the "
+        "publish_watcher daemon is alive so permalinks resolve fast.\n\n"
         f"COMMANDS (run both in order, this is the entire task):\n"
         f"  bash {PIPELINE}/watcher_supervisor.sh\n"
-        f"  {PYTHON} {PIPELINE}/publish_from_notion.py --once\n\n"
+        f"  {PYTHON} {PIPELINE}/publish_from_notion.py --once --limit 1 --max-age-hours 72\n\n"
         "watcher_supervisor.sh is idempotent — no-op if daemon alive, "
         "respawns it if dead (it self-respawns on python crashes, so this "
         "only matters after a container restart).\n\n"
-        "On exit 0 with empty Notion queue: report only the watcher status "
-        "(alive / restarted) in one line. On exit 0 with scheduled rows: "
-        "report watcher status + run_ids."
+        "On exit 0 with empty Notion queue (or all rows >72h old): report "
+        "only the watcher status (alive / restarted) in one line. On exit 0 "
+        "with one row scheduled: report watcher status + run_id."
         + HARD_RULES
     )
 
@@ -281,12 +282,14 @@ def _build_jobs(niche: List[str]):
         },
         {
             "name": "zeus-content-publish-ready",
-            # Every 10 min. Drains any archive rows the user manually flipped
-            # to "Ready to Publish" in Notion — the supported manual-publish
-            # path. Also keeps the publish_watcher daemon alive (idempotent
-            # supervisor restart). Exits silently on empty queue, so 144
-            # ticks/day at near-zero cost is acceptable.
-            "schedule": "*/10 * * * *",
+            # Every 30 min. Drip-feeds ONE piece per fire from the "Ready to
+            # Publish" queue (FIFO, capped at 72h freshness). Goal: smooth
+            # platform cadence + auto-recovery for the queue without
+            # bulk-shipping (which previously got us throttled by Publer and
+            # cascaded into a bulk-delete that nuked the whole schedule).
+            # Also keeps the publish_watcher daemon alive (idempotent
+            # supervisor restart). Exits silently on empty queue.
+            "schedule": "*/30 * * * *",
             "prompt": publish_ready,
         },
         {

@@ -149,14 +149,27 @@ def _patch_status(archive: NotionArchive, page_id: str, status_label: str) -> No
         r.raise_for_status()
 
 
-def _query_ready(archive: NotionArchive) -> list[dict]:
-    """Fetch every row currently flagged 'Ready to Publish'."""
+def _query_ready(
+    archive: NotionArchive,
+    *,
+    max_age_hours: Optional[float] = None,
+) -> list[dict]:
+    """Fetch rows currently flagged 'Ready to Publish'.
+
+    When ``max_age_hours`` is set, drop rows whose Notion ``created_time`` is
+    older than that many hours — protects the cron drain from re-firing stale
+    pieces that were stuck in the queue for days. Returns oldest-first so a
+    `--limit 1` caller drains the backlog FIFO.
+    """
     pages: list[dict] = []
     cursor: Optional[str] = None
     while True:
         body: dict[str, Any] = {
             "filter": {"property": "Status", "select": {"equals": READY_STATUS}},
             "page_size": 50,
+            # Notion returns oldest-first by default; be explicit so the
+            # `--limit 1` cron always picks the head of the FIFO.
+            "sorts": [{"timestamp": "created_time", "direction": "ascending"}],
         }
         if cursor:
             body["start_cursor"] = cursor
@@ -174,6 +187,28 @@ def _query_ready(archive: NotionArchive) -> list[dict]:
         if not data.get("has_more"):
             break
         cursor = data.get("next_cursor")
+
+    if max_age_hours is not None:
+        cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
+        kept: list[dict] = []
+        for page in pages:
+            created = page.get("created_time") or ""
+            try:
+                # Notion sends RFC3339 with trailing Z; fromisoformat handles
+                # the +00:00 form, so swap before parsing.
+                ts = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                # Unparseable created_time → keep the row rather than silently
+                # dropping it; better to over-publish than to leak a piece.
+                kept.append(page)
+                continue
+            if ts >= cutoff:
+                kept.append(page)
+            else:
+                pid = page.get("id", "?")
+                log.info(f"  skipping stale row {pid} created={created} (>{max_age_hours}h old)")
+        pages = kept
+
     return pages
 
 
@@ -383,12 +418,22 @@ def _publish_one(archive: NotionArchive, page: dict, *, dry_run: bool) -> Option
     return piece
 
 
-def run_pass(archive: NotionArchive, *, dry_run: bool) -> int:
-    pages = _query_ready(archive)
+def run_pass(
+    archive: NotionArchive,
+    *,
+    dry_run: bool,
+    limit: Optional[int] = None,
+    max_age_hours: Optional[float] = None,
+) -> int:
+    pages = _query_ready(archive, max_age_hours=max_age_hours)
     if not pages:
         log.info("no pages in 'Ready to Publish' status — nothing to do")
         return 0
-    log.info(f"found {len(pages)} ready page(s)")
+    if limit is not None and limit > 0:
+        log.info(f"found {len(pages)} ready page(s); processing first {min(limit, len(pages))} (FIFO)")
+        pages = pages[:limit]
+    else:
+        log.info(f"found {len(pages)} ready page(s)")
     handled = 0
     for page in pages:
         try:
@@ -406,6 +451,20 @@ def main() -> int:
     g.add_argument("--watch", type=int, metavar="SECONDS", help="loop forever, sleep N seconds between passes")
     g.add_argument("--page-id", help="publish exactly this Notion page id, regardless of status")
     p.add_argument("--dry-run", action="store_true", help="list candidates without locking or publishing")
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="publish at most N rows per pass (FIFO by Notion created_time). Cron drip-feed uses 1.",
+    )
+    p.add_argument(
+        "--max-age-hours",
+        type=float,
+        default=None,
+        metavar="H",
+        help="skip rows older than H hours (by Notion created_time). Cron drip-feed uses 72.",
+    )
     args = p.parse_args()
 
     required = ["NOTION_API_KEY", "ZEUS_NOTION_HUB_PAGE_ID"]
@@ -433,12 +492,22 @@ def main() -> int:
         log.info(f"watch mode: polling every {args.watch}s — Ctrl-C to stop")
         while True:
             try:
-                run_pass(archive, dry_run=args.dry_run)
+                run_pass(
+                    archive,
+                    dry_run=args.dry_run,
+                    limit=args.limit,
+                    max_age_hours=args.max_age_hours,
+                )
             except Exception as e:
                 log.exception(f"pass failed: {e}")
             time.sleep(args.watch)
 
-    run_pass(archive, dry_run=args.dry_run)
+    run_pass(
+        archive,
+        dry_run=args.dry_run,
+        limit=args.limit,
+        max_age_hours=args.max_age_hours,
+    )
     return 0
 
 
