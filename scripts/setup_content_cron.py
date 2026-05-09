@@ -179,6 +179,21 @@ def _build_jobs(niche: List[str]):
         + HARD_RULES
     )
 
+    weekly_analytics = (
+        "Run the weekly Publer-analytics rollup. The script pulls last-7-day "
+        "post insights from every connected social account, asks DeepSeek V4 "
+        "Pro to write a 'what's working / why / patterns' analysis, writes "
+        "one row to the Notion Weekly Analytics DB (auto-created on first "
+        "run), and emails the report via the same backend rail as the per-"
+        "post pipeline.\n\n"
+        f"COMMAND (this is the entire task):\n"
+        f"  {PYTHON} {PIPELINE}/weekly_analytics.py\n\n"
+        "On exit 0: report the run_id and total_reach from the JSON line on "
+        "stdout in one line. On non-zero exit, capture stdout+stderr to "
+        "~/.hermes/zeus_email_outbox/<timestamp>_weekly_error.txt and exit."
+        + HARD_RULES
+    )
+
     publish_ready = (
         "Daily safety-net for Notion rows the user flipped to 'Ready to "
         "Publish' but that the on-demand publish path didn't catch. ALSO "
@@ -253,6 +268,14 @@ def _build_jobs(niche: List[str]):
             # empty queue — zero cost when nothing to do.
             "schedule": "0 6 * * *",
             "prompt": notion_ideas,
+        },
+        {
+            "name": "zeus-content-weekly-analytics",
+            # Sunday 17:00 UTC = 20:00 Europe/Athens (EEST, UTC+3). Picks up
+            # the full Mon-Sun week and emails the analysis ahead of Monday's
+            # planning window.
+            "schedule": "0 17 * * 0",
+            "prompt": weekly_analytics,
         },
     ]
 
