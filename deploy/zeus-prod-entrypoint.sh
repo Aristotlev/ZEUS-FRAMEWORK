@@ -176,6 +176,17 @@ if [ -f "$HERMES_INSTALL/tools/skills_sync.py" ]; then
         cp -rn "$HERMES_INSTALL/skills/"* "$HERMES_HOME/skills/" 2>/dev/null || true
 fi
 
+# Soft deps for the Notion ideas ingester. pypdf is needed when users drop
+# PDFs into the Content Ideas DB (extract_pdf_text falls back to a no-op
+# without it, so the rest of the pipeline still runs — but PDF support
+# is silently broken). Hermes's uv venv ships without `pip` itself, so we
+# use the system uv binary. Idempotent: uv skips the install if installed.
+if command -v uv >/dev/null 2>&1; then
+    uv pip install --quiet --python "$HERMES_INSTALL/.venv/bin/python" pypdf 2>&1 \
+        | sed 's/^/[zeus-prod uv] /' || \
+        echo "[zeus-prod] WARN: pypdf install failed (PDF attachments will be ignored)"
+fi
+
 # Wait for Redis + Postgres
 wait_for() {
     local host="$1" port="$2" name="$3" retries=30

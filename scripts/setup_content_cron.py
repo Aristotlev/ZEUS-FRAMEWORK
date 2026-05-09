@@ -165,11 +165,13 @@ def _build_jobs(niche: List[str]):
 
     notion_ideas = (
         "Run the Content Ideas ingester. The script reads 'New' rows from "
-        "the Notion Content Ideas DB, distills each (URL / YouTube / text) "
-        "into a drafted archive page, and (when 'Auto Publish' is checked) "
-        "flips the archive row to 'Ready to Publish'. Runs once a day — "
-        "manual idea entry isn't time-sensitive; on-demand invocation "
-        "(if you ever need it sooner) is faster than tightening this cron.\n\n"
+        "the Notion Content Ideas DB, distills each input (URL / YouTube / "
+        "text / attached photos / attached PDF / attached video) into a "
+        "drafted archive page that matches the row's Target Type (Article / "
+        "Long Article / Carousel / Short Video / Long Video), then (when "
+        "'Auto Publish' is checked, default ON) flips the archive row to "
+        "'Ready to Publish' for the publish_watcher to ship. Runs every 5 "
+        "minutes so dropping a row feels instant.\n\n"
         f"COMMAND (this is the entire task):\n"
         f"  {PYTHON} {PIPELINE}/ingest_ideas.py --once\n\n"
         "On exit 0 with no work done: exit silently (no email). On exit 0 "
@@ -225,11 +227,16 @@ def _build_jobs(niche: List[str]):
         )
     )
 
-    # Only article-slot is active (2026-05-08 — user request: one long-form
-    # post every 2h, refine later). The other prompt strings (carousel_slot,
-    # notion_ideas, publish_ready, daily_crawl) stay defined above so re-
-    # enabling any of them is a one-line dict-append below.
-    _ = (carousel_slot, notion_ideas, publish_ready, daily_crawl)  # keep refs
+    # Active jobs (2026-05-09):
+    #   - article-slot: every-2h auto-pick + post (long_article, the main loop)
+    #   - ideas-ingest: every 5min, drains the Notion Content Ideas DB so
+    #     anything the user dumps in (URL / file / PDF / etc) gets compiled
+    #     into the chosen Target Type fast.
+    #   - publish-ready: every 10min safety-net for orphaned Notion rows the
+    #     user manually flipped to "Ready to Publish", and keeps the
+    #     publish_watcher daemon alive after container restarts.
+    # carousel_slot + daily_crawl stay defined above for easy re-enable.
+    _ = (carousel_slot, daily_crawl)  # keep refs
 
     return [
         {
@@ -237,6 +244,21 @@ def _build_jobs(niche: List[str]):
             # Every 2h on the hour (00,02,04,…,22 UTC = 12×/day).
             "schedule": "0 */2 * * *",
             "prompt": article_slot,
+        },
+        {
+            "name": "zeus-content-ideas-ingest",
+            # Every 5 minutes. The job exits silently when no New rows are
+            # waiting, so this is essentially free unless work is actually
+            # available — fast feel without the cost of polling overhead.
+            "schedule": "*/5 * * * *",
+            "prompt": notion_ideas,
+        },
+        {
+            "name": "zeus-content-publish-ready",
+            # Every 10 minutes. Picks up Notion rows the user manually
+            # flipped to "Ready to Publish" and keeps publish_watcher alive.
+            "schedule": "*/10 * * * *",
+            "prompt": publish_ready,
         },
     ]
 
