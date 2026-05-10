@@ -49,8 +49,13 @@ class AudioMode(str, Enum):
 
 
 PLATFORMS_BY_TYPE: dict[ContentType, list[str]] = {
-    ContentType.ARTICLE: ["twitter", "instagram", "linkedin", "tiktok", "facebook"],
-    ContentType.LONG_ARTICLE: ["twitter", "instagram", "linkedin", "tiktok", "facebook"],
+    # tiktok dropped from articles 2026-05-10: TikTok's OpenAPI cap is
+    # ~10–12 posts/24h per creator; at 12 article slots/day every fire
+    # was getting rate-limited, leaving the watcher waiting on a
+    # platform that would never go live. Short videos / carousels still
+    # include tiktok — their cadence is far below the cap.
+    ContentType.ARTICLE: ["twitter", "instagram", "linkedin", "facebook"],
+    ContentType.LONG_ARTICLE: ["twitter", "instagram", "linkedin", "facebook"],
     # reddit is wired here for FUTURE Publer integration. If PUBLER_REDDIT_ID
     # is unset, `_schedule_one` skips it with a "no PUBLER_*_ID configured"
     # warning and never sends a request. When the account gets connected

@@ -998,8 +998,8 @@ def generate_article_text(topic: str, content_type: ContentType) -> tuple[str, s
         f"Format:\n"
         f"- First line: a punchy 5-10 word title (no dates).\n"
         f"- Body: {target_chars} characters. The body must be long enough that Instagram, "
-        f"LinkedIn, TikTok and Facebook all truncate it with a 'read more' affordance "
-        f"(thresholds 125 / 210 / 80 / 480 chars respectively).\n"
+        f"LinkedIn and Facebook all truncate it with a 'read more' affordance "
+        f"(thresholds 125 / 210 / 480 chars respectively).\n"
         f"- Tone: Bloomberg Terminal condensed. Concrete numbers, sectors, take.\n"
         f"- No hashtags. No 'in conclusion'. No filler.\n"
     )

@@ -313,7 +313,7 @@ def _distill(
         f"Distill the source into ONE post:\n"
         f"  - Body length: {target_chars} characters\n"
         f"  - Tone: Bloomberg Terminal condensed. Concrete numbers, tickers, take.\n"
-        f"  - The body must be long enough that Instagram, LinkedIn, TikTok and "
+        f"  - The body must be long enough that Instagram, LinkedIn and "
         f"Facebook all truncate it with a 'read more' affordance.\n"
         f"  - No hashtags. No 'in conclusion'. No filler.\n\n"
         f"Return ONLY a JSON object with this exact shape:\n"
