@@ -320,6 +320,15 @@ def _final_status(states: dict[str, str], piece: ContentPiece, past_deadline: bo
     # a run where TikTok went live but the URL never came back.
     if confirmed and not failed and not pending:
         return "posted"
+    if confirmed and failed and not pending:
+        # No platforms left to advance — the failed ones won't recover
+        # (TikTok rate-limit, ghost account, etc.) and the rest are live.
+        # Finalize now rather than waiting for the 24h deadline. Was:
+        # stayed "scheduled" until past_deadline, which left 4 rows in
+        # the queue 9–13h on 2026-05-10 when TikTok hit its OpenAPI
+        # daily cap; the completion email never fired and the user
+        # thought posting had stopped.
+        return "partial"
     if past_deadline:
         # Past the row's hard deadline. Stop waiting on still-pending
         # platforms — finalize now. Treating pending as failed lets the row
