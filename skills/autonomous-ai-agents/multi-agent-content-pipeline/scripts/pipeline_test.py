@@ -215,33 +215,39 @@ DEFAULT_SOURCES_BY_NICHE: dict[str, list[str]] = {
         "businessinsider.com", "fortune.com", "axios.com",
         "investing.com", "barrons.com",
         "pymnts.com", "finextra.com",
+        "unusualwhales.com",
     ],
     "stocks": [
         "finance.yahoo.com", "marketwatch.com", "seekingalpha.com",
         "businessinsider.com", "investing.com", "fortune.com",
         "barrons.com",
         "benzinga.com", "nasdaq.com",
+        "unusualwhales.com",
     ],
     "forex": [
         "ft.com", "marketwatch.com", "investing.com",
         "businessinsider.com", "axios.com",
         "fxstreet.com", "dailyfx.com", "forexlive.com", "kitco.com",
+        "unusualwhales.com",
     ],
     "crypto": [
         "coindesk.com", "decrypt.co", "cointelegraph.com",
         "bitcoinmagazine.com", "cryptoslate.com", "blockworks.co",
         "dlnews.com",
+        "unusualwhales.com",
     ],
     "geopolitics": [
         "aljazeera.com", "bbc.com", "ft.com", "apnews.com",
         "dw.com", "theguardian.com",
         "france24.com", "politico.eu", "npr.org",
+        "unusualwhales.com",
     ],
     "ai_economy": [
         "newsdigest.ai", "techcrunch.com", "theverge.com",
         "venturebeat.com", "arstechnica.com", "axios.com",
         "wired.com", "technologyreview.com", "theregister.com",
         "restofworld.org",
+        "unusualwhales.com",
     ],
 }
 
