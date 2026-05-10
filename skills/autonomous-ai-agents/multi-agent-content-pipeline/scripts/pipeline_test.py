@@ -651,15 +651,21 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
     cost_source = "actual"
     last_failure = ""
 
+    # Two-pass with shared 72h max-age (changed 2026-05-10): the first pass
+    # asks the model for a 24h-fresh story but accepts up to 72h. Without
+    # max_age_hours=72, this used to reject a 37.9h-old allowlisted story and
+    # fall through to a second 72h prompt that often returned a *different*
+    # off-allowlist story — both calls billed, slot lost. The second pass
+    # only fires if the first returned no valid candidate at all.
     for window_hours in (24, 72):
         topic, url, published, cost, csource = _pick_with_constraints(
-            type_hint, allowed, window_hours, active_niches
+            type_hint, allowed, window_hours, active_niches, max_age_hours=72
         )
         total_cost += cost
         if csource == "estimate":
             cost_source = "estimate"
         if topic:
-            tag = "" if window_hours == 24 else f" [WIDENED {window_hours}h]"
+            tag = "" if window_hours == 24 else f" [RETRY {window_hours}h]"
             log.info(
                 f"auto-pick{tag}: niche={active_niche} '{topic}' "
                 f"(model={PICKER_MODEL}, src={url}, published={published}, "
@@ -667,10 +673,10 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
             )
             if window_hours > 24:
                 log.warning(
-                    f"auto-pick: 24h window had no qualifying story for niche "
+                    f"auto-pick: 24h prompt yielded no candidate for niche "
                     f"{active_niche!r} within allowlist {sorted(allowed)} — "
-                    f"widened to {window_hours}h. If this happens often, "
-                    f"consider expanding sources for this niche."
+                    f"retried with {window_hours}h prompt. If this happens "
+                    f"often, consider expanding sources for this niche."
                 )
             _record_picker_choice(active_niche, topic, url)
             return topic, total_cost, cost_source
@@ -686,14 +692,27 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
 
 
 def _pick_with_constraints(
-    type_hint: str, allowed: set[str], window_hours: int, active_niches: list[str]
+    type_hint: str, allowed: set[str], window_hours: int, active_niches: list[str],
+    max_age_hours: Optional[int] = None,
 ) -> tuple[str, str, str, float, str]:
-    """Single picker call constrained to `allowed` domains and `window_hours`
-    freshness. Returns (topic, source_url, published_at_iso, cost, cost_source).
+    """Single picker call constrained to `allowed` domains and freshness.
+
+    `window_hours` controls the PROMPT — what we ask the model to find.
+    `max_age_hours` controls the VERIFIER — what we'll actually accept after
+    fetching the page's real publish date. Defaults to `window_hours` (strict).
+    Setting max_age_hours > window_hours biases toward fresh stories via the
+    prompt while still accepting reasonably-stale ones without an extra API
+    call (fixes the 2026-05-10 regression where the 24h pass rejected a 37.9h
+    story, then the 72h retry returned a different off-allowlist story and
+    burned a second picker call for nothing — losing the slot entirely).
+
+    Returns (topic, source_url, published_at_iso, cost, cost_source).
     Empty topic means the picker call failed validation — caller decides
     whether to widen the window or give up. Validation failures log a warning
     and return; only empty/unparseable picker responses are silent.
     """
+    if max_age_hours is None:
+        max_age_hours = window_hours
     today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y at %H:%M UTC")
     domain_list = ", ".join(sorted(allowed))
     niche_str = " / ".join(active_niches)
@@ -831,13 +850,19 @@ def _pick_with_constraints(
     age_hours = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 3600.0
     # Half-hour grace for clock skew + small future-dated tolerance for
     # publishers that timestamp ahead (rare, but happens with embargoed wires).
-    if age_hours < -1.0 or age_hours > window_hours + 0.5:
+    if age_hours < -1.0 or age_hours > max_age_hours + 0.5:
         log.warning(
             f"auto-pick: rejected — story is {age_hours:.1f}h old "
-            f"(limit {window_hours}h), real_published={pub_dt.isoformat()}, "
+            f"(limit {max_age_hours}h), real_published={pub_dt.isoformat()}, "
             f"picker_claimed={published}, url={url}"
         )
         return "", "", "", cost, csource
+    if age_hours > window_hours + 0.5:
+        log.info(
+            f"auto-pick: accepting story {age_hours:.1f}h old "
+            f"(prompt asked for {window_hours}h, max accept {max_age_hours}h) "
+            f"— picker had nothing fresher within allowlist; saved one retry"
+        )
 
     return topic, url, pub_dt.isoformat(), cost, csource
 
