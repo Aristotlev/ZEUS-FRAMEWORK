@@ -111,6 +111,15 @@ ORCHESTRATOR_MODEL = "google/gemini-2.5-flash"
 # Override via PICKER_MODEL env if you want to swap.
 PICKER_MODEL = os.getenv("PICKER_MODEL", "google/gemini-2.5-flash:online")
 
+# Cross-source grounding (added 2026-05-11 to fix the "topic was current but the
+# body was hallucinated from training data" regression). Tavily searches the live
+# web for related coverage of the picked story so the writer can synthesize
+# across outlets instead of paraphrasing one. Marketaux adds entity tagging
+# (tickers, sentiment) for finance-flavoured niches where it actually helps.
+TAVILY_KEY = os.getenv("TAVILY_API_KEY", "")
+MARKETAUX_KEY = os.getenv("MARKETAUX_API_KEY", "")
+FINANCE_NICHES = {"finance", "stocks", "forex", "crypto"}
+
 # Publer (only used with --publish)
 PUBLER_BASE = "https://app.publer.com/api/v1"
 PUBLER_KEY = os.getenv("PUBLER_API_KEY", "")
@@ -572,6 +581,189 @@ def _fetch_pub_date_from_url(url: str) -> Optional[datetime]:
     return fallback
 
 
+def _fetch_article_body(url: str, max_chars: int = 4000) -> str:
+    """Fetch `url` and return the article body as plain text (capped).
+
+    Used as grounding for the writer LLM so it cites real numbers/quotes/names
+    from the actual story instead of hallucinating from training-data memory.
+    Returns "" on any failure — caller treats empty as "no grounding available"
+    and falls back to ungrounded generation rather than killing the slot.
+
+    Extraction is intentionally lo-fi (regex strip, no bs4/trafilatura): the
+    LLM doesn't need pristine HTML→text, it needs the gist + facts. ~3-5k chars
+    of slightly-noisy plain text is plenty for an article-length post.
+    """
+    if not url:
+        return ""
+    try:
+        r = requests.get(
+            url,
+            timeout=10,
+            proxies=_picker_proxies(),
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "image/avif,image/webp,*/*;q=0.8"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "Referer": "https://www.google.com/",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "cross-site",
+                "Upgrade-Insecure-Requests": "1",
+            },
+            allow_redirects=True,
+        )
+        r.raise_for_status()
+        html = r.text
+    except Exception as e:
+        log.warning(f"grounding: source-body fetch failed ({url}): {e}")
+        return ""
+
+    import re
+    # Strip noise blocks first so the body extractor doesn't pick them.
+    noise_tags = ("script", "style", "nav", "header", "footer", "aside",
+                  "form", "button", "iframe", "noscript", "svg")
+    for tag in noise_tags:
+        html = re.sub(
+            rf"<{tag}\b[^>]*>.*?</{tag}>", " ", html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+    # Prefer the largest <article> block; fall back to the largest
+    # content-flavoured <div>; final fallback is the whole document.
+    candidates: list[str] = []
+    for m in re.finditer(r"<article\b[^>]*>(.*?)</article>", html, flags=re.IGNORECASE | re.DOTALL):
+        candidates.append(m.group(1))
+    if not candidates:
+        for m in re.finditer(
+            r'<div[^>]+class="[^"]*(?:article|story|post|entry|content|body)[^"]*"[^>]*>(.*?)</div>',
+            html, flags=re.IGNORECASE | re.DOTALL,
+        ):
+            candidates.append(m.group(1))
+    chunk = max(candidates, key=len) if candidates else html
+
+    # HTML → text: strip tags, decode common entities, collapse whitespace.
+    text = re.sub(r"<[^>]+>", " ", chunk)
+    text = (text.replace("&nbsp;", " ").replace("&amp;", "&")
+                .replace("&quot;", '"').replace("&#39;", "'")
+                .replace("&lt;", "<").replace("&gt;", ">"))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars]
+
+
+def _tavily_cross_sources(
+    topic: str, primary_url: str, niche: str, *, max_results: int = 3
+) -> list[dict]:
+    """Pull 2-3 related articles for `topic` so the writer has multiple angles.
+
+    Returns a list of {title, url, source, snippet, published_at} — ready to
+    embed in the writer prompt. Excludes the primary URL (we already have its
+    full body) and any URL already in our recent picker history (don't loop
+    back on yesterday's coverage). Returns [] on any failure — grounding is
+    best-effort, never fatal.
+    """
+    if not TAVILY_KEY or not topic:
+        return []
+    try:
+        primary_host = _url_host(primary_url) if primary_url else ""
+        r = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_KEY,
+                "query": f"{topic} {niche}".strip(),
+                "search_depth": "advanced",
+                "topic": "news",
+                "days": 3,
+                "max_results": max(max_results + 2, 5),  # over-fetch; we filter primary host + dupes
+                "include_raw_content": False,
+                "exclude_domains": [primary_host] if primary_host else [],
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        log.warning(f"grounding: tavily call failed ({topic!r}): {e}")
+        return []
+
+    seen_urls = {e["url"] for e in _recent_picked_urls() if e.get("url")}
+    out: list[dict] = []
+    for hit in payload.get("results", []) or []:
+        url = (hit.get("url") or "").strip()
+        if not url or url == primary_url or url in seen_urls:
+            continue
+        if primary_host and _url_host(url) == primary_host:
+            continue
+        snippet = (hit.get("content") or "").strip()
+        if not snippet:
+            continue
+        out.append({
+            "title": (hit.get("title") or "").strip(),
+            "url": url,
+            "source": _url_host(url),
+            "snippet": snippet[:600],  # keep prompt lean
+            "published_at": (hit.get("published_date") or "").strip(),
+        })
+        if len(out) >= max_results:
+            break
+    return out
+
+
+def _marketaux_entities(topic: str, niche: str) -> list[dict]:
+    """Fetch ticker/entity tags for finance-flavoured niches via Marketaux.
+
+    Returns a deduped list of {symbol, name, sentiment, exchange} drawn from
+    the matching articles' entity tagging. Only runs for FINANCE_NICHES — for
+    geopolitics/ai_economy the API has poor coverage and adds nothing useful.
+    Returns [] on any failure — entity enrichment is best-effort.
+    """
+    if not MARKETAUX_KEY or niche not in FINANCE_NICHES or not topic:
+        return []
+    try:
+        r = requests.get(
+            "https://api.marketaux.com/v1/news/all",
+            params={
+                "api_token": MARKETAUX_KEY,
+                "search": topic,
+                "language": "en",
+                "filter_entities": "true",
+                "limit": 3,
+                "published_after": (
+                    datetime.now(timezone.utc) - timedelta(days=3)
+                ).strftime("%Y-%m-%dT%H:%M"),
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        log.warning(f"grounding: marketaux call failed ({topic!r}): {e}")
+        return []
+
+    seen: set[str] = set()
+    out: list[dict] = []
+    for art in payload.get("data", []) or []:
+        for ent in art.get("entities", []) or []:
+            sym = (ent.get("symbol") or "").strip()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            out.append({
+                "symbol": sym,
+                "name": (ent.get("name") or "").strip(),
+                "sentiment": ent.get("sentiment_score"),
+                "exchange": (ent.get("exchange") or "").strip(),
+            })
+    return out[:8]  # cap so the prompt stays focused
+
+
 def _extract_json_object(text: str) -> Optional[dict]:
     """Defensively pull a JSON object out of `text`. Handles ```json fences,
     leading prose ('Here is the result:'), and trailing citation blocks."""
@@ -617,7 +809,7 @@ def _niche_clause() -> str:
 MAX_NICHE_ATTEMPTS_PER_SLOT = 3
 
 
-def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
+def auto_pick_topic(content_type: "ContentType") -> tuple[str, str, str, str, float, str]:
     """Pick a current, niche-specific topic when no --topic is provided.
 
     Strict provenance contract (added 2026-05-06): the picker MUST return a
@@ -642,8 +834,13 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
     are still relevant within that window for the niches we cover; older
     = stale). Both windows failing on a niche → advance to the next niche.
 
-    Returns (topic, cost_usd, cost_source). Cost is the sum of ALL picker
-    calls made across every attempted niche this slot.
+    Returns (topic, source_url, published_at_iso, niche, cost_usd, cost_source).
+    The URL/published/niche are passed downstream so the writer can fetch the
+    actual article body for grounding (added 2026-05-11) — without them, the
+    picker found a real story but the writer hallucinated a body from training
+    data, producing posts that were "current headline / stale content."
+    Cost is the sum of ALL picker calls made across every attempted niche this
+    slot.
     """
     if not NICHE:
         raise RuntimeError(
@@ -723,7 +920,7 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
                         f"{', '.join(f'{n} ({r})' for n, r in tried)}"
                     )
                 _record_picker_choice(active_niche, topic, url)
-                return topic, total_cost, cost_source
+                return topic, url, published, active_niche, total_cost, cost_source
             last_failure = f"no qualifying story in {window_hours}h window"
 
         log.warning(
@@ -982,8 +1179,28 @@ def openrouter_chat(
     return text, cost, source
 
 
-def generate_article_text(topic: str, content_type: ContentType) -> tuple[str, str, float, str]:
-    """Generate (title, body, cost_usd, cost_source). Body length tuned for 'read more' on every visual platform."""
+def generate_article_text(
+    topic: str,
+    content_type: ContentType,
+    *,
+    source_url: str = "",
+    source_text: str = "",
+    cross_sources: Optional[list[dict]] = None,
+    entities: Optional[list[dict]] = None,
+) -> tuple[str, str, float, str]:
+    """Generate (title, body, cost_usd, cost_source).
+
+    When `source_text` is provided (added 2026-05-11), the writer is grounded
+    in the real article body — facts, numbers, names, quotes come from there
+    instead of training-data memory. This fixes the "current headline / stale
+    body" hallucination class. `cross_sources` adds 2-3 related outlets so the
+    writer can synthesize across coverage ("while X reported A, Y noted B").
+    `entities` injects ticker/sentiment tags for finance niches.
+
+    Body length is tuned so Instagram (125), LinkedIn (210), Facebook (480)
+    all truncate with a 'read more' affordance — that's why we don't shorten
+    the targets when grounding is on.
+    """
     target_chars = {
         ContentType.ARTICLE: "250-450",
         ContentType.LONG_ARTICLE: "550-900",
@@ -992,18 +1209,79 @@ def generate_article_text(topic: str, content_type: ContentType) -> tuple[str, s
         ContentType.SHORT_VIDEO: "300-500",
         ContentType.LONG_VIDEO: "700-1200",
     }[content_type]
-    prompt = (
-        f"Write a sharp, data-driven post about: {topic}\n"
-        f"{_niche_clause()}"
-        f"Format:\n"
-        f"- First line: a punchy 5-10 word title (no dates).\n"
-        f"- Body: {target_chars} characters. The body must be long enough that Instagram, "
-        f"LinkedIn and Facebook all truncate it with a 'read more' affordance "
-        f"(thresholds 125 / 210 / 480 chars respectively).\n"
-        f"- Tone: Bloomberg Terminal condensed. Concrete numbers, sectors, take.\n"
-        f"- No hashtags. No 'in conclusion'. No filler.\n"
-    )
-    raw, cost, source = openrouter_chat(prompt, max_tokens=800)
+
+    grounding_blocks: list[str] = []
+    if source_text:
+        grounding_blocks.append(
+            "PRIMARY SOURCE (the story you are reacting to — facts come from here):\n"
+            f"URL: {source_url}\n"
+            f"---\n{source_text}\n---"
+        )
+    if cross_sources:
+        cross_lines = [
+            f"- {cs.get('source','?')}: {cs.get('title','')}\n  {cs.get('snippet','')[:400]}"
+            for cs in cross_sources
+        ]
+        grounding_blocks.append(
+            "CROSS-SOURCE COVERAGE (other outlets on the same story — use to "
+            "compare angles, not to copy):\n" + "\n".join(cross_lines)
+        )
+    if entities:
+        ent_lines = [
+            f"- {e['symbol']}" + (f" ({e['name']})" if e.get("name") else "")
+            + (f" sentiment={e['sentiment']:+.2f}" if isinstance(e.get("sentiment"), (int, float)) else "")
+            for e in entities
+        ]
+        grounding_blocks.append(
+            "TICKERS / ENTITIES tagged on this story (cite by symbol where natural):\n"
+            + "\n".join(ent_lines)
+        )
+
+    if grounding_blocks:
+        prompt = (
+            f"You are a market analyst writing an ORIGINAL take on a current news story. "
+            f"You are NOT summarizing the source — you are reacting to it with your own angle.\n\n"
+            f"TOPIC: {topic}\n"
+            f"{_niche_clause()}"
+            f"\n" + "\n\n".join(grounding_blocks) + "\n\n"
+            f"RULES:\n"
+            f"- Steal the FACTS from the primary source: numbers, names, quotes, dates, percentages. "
+            f"Cite them precisely. If your training-data 'memory' contradicts the source, TRUST THE SOURCE.\n"
+            f"- Don't steal the STRUCTURE: do not paraphrase the article paragraph by paragraph. "
+            f"Open with YOUR take, not their lede.\n"
+            f"- Where cross-source coverage is provided, contrast outlets where it adds insight "
+            f"(e.g. 'X reports A while Y notes B'). Don't force it if angles align.\n"
+            f"- End with a forward-looking line (second-order effect, who wins/loses, what to watch). "
+            f"Not a summary.\n"
+            f"- Format: first line = punchy 5-10 word title (no dates). "
+            f"Body = {target_chars} characters, long enough that Instagram (125c), LinkedIn (210c) "
+            f"and Facebook (480c) all show a 'read more' truncation.\n"
+            f"- Tone: Bloomberg Terminal condensed. Concrete numbers, sectors, take.\n"
+            f"- No hashtags. No 'in conclusion'. No filler. No 'According to the article'.\n"
+        )
+        max_tokens = 1100  # grounded prompts have more to weave in
+    else:
+        # Fallback: no grounding available (fetch failed / manual --topic without
+        # URL). Keep the legacy behaviour so the slot still ships rather than
+        # crashing — but log loudly so we notice if grounding silently breaks.
+        log.warning(
+            f"text-gen: no source grounding available for topic={topic!r} — "
+            f"falling back to ungrounded generation. Body may drift from current facts."
+        )
+        prompt = (
+            f"Write a sharp, data-driven post about: {topic}\n"
+            f"{_niche_clause()}"
+            f"Format:\n"
+            f"- First line: a punchy 5-10 word title (no dates).\n"
+            f"- Body: {target_chars} characters. The body must be long enough that Instagram, "
+            f"LinkedIn and Facebook all truncate it with a 'read more' affordance "
+            f"(thresholds 125 / 210 / 480 chars respectively).\n"
+            f"- Tone: Bloomberg Terminal condensed. Concrete numbers, sectors, take.\n"
+            f"- No hashtags. No 'in conclusion'. No filler.\n"
+        )
+        max_tokens = 800
+
+    raw, cost, source = openrouter_chat(prompt, max_tokens=max_tokens)
     lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
     title = lines[0].lstrip("#").strip()
     body = "\n\n".join(lines[1:]) if len(lines) > 1 else raw
@@ -1834,6 +2112,8 @@ def run(
     wait_for_live: bool = False,
     quality: Optional[str] = None,
     picker_cost: Optional[tuple[float, str]] = None,
+    source_url: str = "",
+    source_niche: str = "",
 ) -> ContentPiece:
     log.info("=" * 60)
     log.info(f"  Zeus pipeline -- {content_type.value}: {topic}")
@@ -1851,8 +2131,33 @@ def run(
         pcost, psource = picker_cost
         piece.add_cost(PICKER_MODEL, pcost, kind="text", source=psource)
 
+    # Grounding (added 2026-05-11): fetch the picked article + 2-3 cross-source
+    # outlets + (for finance niches) ticker entities, then hand them to the
+    # writer so the post is anchored in real reporting instead of training-data
+    # memory. All three calls are best-effort — failures degrade to ungrounded
+    # generation rather than killing the slot.
+    source_text = ""
+    cross_sources: list[dict] = []
+    entities: list[dict] = []
+    if source_url:
+        with _Phase(piece, "grounding"):
+            source_text = _fetch_article_body(source_url)
+            cross_sources = _tavily_cross_sources(topic, source_url, source_niche)
+            entities = _marketaux_entities(topic, source_niche)
+        log.info(
+            f"  grounding -> source_body={len(source_text)}c "
+            f"cross_sources={len(cross_sources)} entities={len(entities)} "
+            f"took={piece.phase_durations_ms.get('grounding', 0)}ms"
+        )
+
     with _Phase(piece, "text_gen"):
-        title, body, text_cost, text_source = generate_article_text(topic, content_type)
+        title, body, text_cost, text_source = generate_article_text(
+            topic, content_type,
+            source_url=source_url,
+            source_text=source_text,
+            cross_sources=cross_sources,
+            entities=entities,
+        )
     piece.title = title
     piece.body = body
     piece.add_cost(ORCHESTRATOR_MODEL, text_cost, kind="text", source=text_source)
@@ -2076,12 +2381,16 @@ def main() -> int:
         return 3
 
     try:
+        source_url = ""
+        source_niche = ""
         if args.topic:
             topic = args.topic
             picker_cost = None
         else:
             try:
-                topic, _pcost, _psource = auto_pick_topic(ContentType(args.type))
+                topic, source_url, _published, source_niche, _pcost, _psource = (
+                    auto_pick_topic(ContentType(args.type))
+                )
             except Exception as picker_error:
                 # Picker failed (no qualifying story / API error). Emit a
                 # failed-run ledger row + email so the user sees it instead
@@ -2099,6 +2408,8 @@ def main() -> int:
             wait_for_live=args.wait_for_live,
             quality=args.quality,
             picker_cost=picker_cost,
+            source_url=source_url,
+            source_niche=source_niche,
         )
         return 0
     except Exception as e:  # surface clean failure rather than dumping a traceback into the user's terminal
