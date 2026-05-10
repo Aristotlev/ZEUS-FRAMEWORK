@@ -608,6 +608,9 @@ def _niche_clause() -> str:
     )
 
 
+MAX_NICHE_ATTEMPTS_PER_SLOT = 3
+
+
 def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
     """Pick a current, niche-specific topic when no --topic is provided.
 
@@ -618,41 +621,29 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
     else is rejected — this is the only way "from headlines in the last 12h"
     becomes enforceable instead of a wish in the prompt.
 
-    Niche scope: every run uses exactly ONE niche from the configured list,
-    chosen by round-robin rotation (see _pick_next_niche). This guarantees
-    even coverage across all configured niches instead of letting the picker
-    always pick whichever has the loudest headline.
+    Niche scope: every run starts with one niche from the configured list,
+    chosen by round-robin rotation (see _pick_next_niche). If that niche's
+    picker rejects (no qualifying story / no allowlist), we advance to the
+    next niche in rotation and try again, up to MAX_NICHE_ATTEMPTS_PER_SLOT
+    distinct niches (added 2026-05-10). This prevents a single thin/slow
+    niche from burning a 2h slot entirely. Niches that "had their turn"
+    (success or fail) move to the back of the rotation, so fairness is
+    preserved across slots — a niche that failed isn't immediately retried.
 
-    Freshness fallback: try 24h first; if no valid story is found, retry
-    once with a 72h window (logged loudly). 72h is the hard cap (user-
-    mandated 2026-05-07: "make the window 72 hours" — articles are still
-    relevant within that window for the niches we cover; older = stale).
-    If both fail, raise — better to skip a slot than publish stale content.
+    Freshness fallback (per niche): try 24h first; if no valid story is
+    found, retry once with a 72h window (logged loudly). 72h is the hard
+    cap (user-mandated 2026-05-07: "make the window 72 hours" — articles
+    are still relevant within that window for the niches we cover; older
+    = stale). Both windows failing on a niche → advance to the next niche.
 
-    Returns (topic, cost_usd, cost_source). Cost is the sum of all picker
-    calls made (initial + optional retry).
+    Returns (topic, cost_usd, cost_source). Cost is the sum of ALL picker
+    calls made across every attempted niche this slot.
     """
     if not NICHE:
         raise RuntimeError(
             "auto-pick: no niche configured. Set content_pipeline.niche in "
             "~/.hermes/config.yaml (e.g. [finance, crypto, geopolitics]) "
             "or pass --topic explicitly."
-        )
-
-    active_niche = _pick_next_niche()
-    log.info(
-        f"auto-pick: rotation → '{active_niche}' "
-        f"(rotation advanced; next slot will pick a different niche)"
-    )
-    active_niches = [active_niche]
-    allowed = _allowed_domains_for_niches(active_niches)
-    if not allowed:
-        raise RuntimeError(
-            f"auto-pick: no source allowlist configured for niche "
-            f"{active_niche!r}. Add it to DEFAULT_SOURCES_BY_NICHE or "
-            f"content_pipeline.sources in ~/.hermes/config.yaml — refusing to "
-            f"run without provenance enforcement (would publish unverified "
-            f"content)."
         )
 
     type_hint = {
@@ -665,44 +656,82 @@ def auto_pick_topic(content_type: "ContentType") -> tuple[str, float, str]:
 
     total_cost = 0.0
     cost_source = "actual"
-    last_failure = ""
+    tried: list[tuple[str, str]] = []  # (niche, reason_rejected)
+    seen_niches: set[str] = set()
+    max_attempts = min(MAX_NICHE_ATTEMPTS_PER_SLOT, len(NICHE))
 
-    # Two-pass with shared 72h max-age (changed 2026-05-10): the first pass
-    # asks the model for a 24h-fresh story but accepts up to 72h. Without
-    # max_age_hours=72, this used to reject a 37.9h-old allowlisted story and
-    # fall through to a second 72h prompt that often returned a *different*
-    # off-allowlist story — both calls billed, slot lost. The second pass
-    # only fires if the first returned no valid candidate at all.
-    for window_hours in (24, 72):
-        topic, url, published, cost, csource = _pick_with_constraints(
-            type_hint, allowed, window_hours, active_niches, max_age_hours=72
+    for attempt in range(max_attempts):
+        active_niche = _pick_next_niche()
+        # Defend against tiny NICHE lists wrapping around mid-slot.
+        if active_niche in seen_niches:
+            break
+        seen_niches.add(active_niche)
+
+        log.info(
+            f"auto-pick: rotation → '{active_niche}' "
+            f"(attempt {attempt + 1}/{max_attempts})"
         )
-        total_cost += cost
-        if csource == "estimate":
-            cost_source = "estimate"
-        if topic:
-            tag = "" if window_hours == 24 else f" [RETRY {window_hours}h]"
-            log.info(
-                f"auto-pick{tag}: niche={active_niche} '{topic}' "
-                f"(model={PICKER_MODEL}, src={url}, published={published}, "
-                f"cost ~${total_cost:.5f}, source={cost_source})"
-            )
-            if window_hours > 24:
-                log.warning(
-                    f"auto-pick: 24h prompt yielded no candidate for niche "
-                    f"{active_niche!r} within allowlist {sorted(allowed)} — "
-                    f"retried with {window_hours}h prompt. If this happens "
-                    f"often, consider expanding sources for this niche."
-                )
-            _record_picker_choice(active_niche, topic, url)
-            return topic, total_cost, cost_source
-        last_failure = f"window={window_hours}h: no qualifying story"
 
+        active_niches = [active_niche]
+        allowed = _allowed_domains_for_niches(active_niches)
+        if not allowed:
+            log.warning(
+                f"auto-pick: niche {active_niche!r} has no source allowlist "
+                f"configured — skipping to next niche. Add it to "
+                f"DEFAULT_SOURCES_BY_NICHE or content_pipeline.sources in "
+                f"~/.hermes/config.yaml to unblock."
+            )
+            tried.append((active_niche, "no source allowlist configured"))
+            continue
+
+        last_failure = ""
+        # Two-pass with shared 72h max-age: 24h prompt first, then 72h prompt
+        # if nothing qualifying. max_age_hours=72 keeps the verifier lenient
+        # so a 37.9h-old allowlisted story doesn't get rejected just because
+        # the prompt asked for 24h.
+        for window_hours in (24, 72):
+            topic, url, published, cost, csource = _pick_with_constraints(
+                type_hint, allowed, window_hours, active_niches, max_age_hours=72
+            )
+            total_cost += cost
+            if csource == "estimate":
+                cost_source = "estimate"
+            if topic:
+                tag = "" if window_hours == 24 else f" [RETRY {window_hours}h]"
+                log.info(
+                    f"auto-pick{tag}: niche={active_niche} '{topic}' "
+                    f"(model={PICKER_MODEL}, src={url}, published={published}, "
+                    f"cost ~${total_cost:.5f}, source={cost_source})"
+                )
+                if window_hours > 24:
+                    log.warning(
+                        f"auto-pick: 24h prompt yielded no candidate for niche "
+                        f"{active_niche!r} within allowlist {sorted(allowed)} — "
+                        f"retried with {window_hours}h prompt. If this happens "
+                        f"often, consider expanding sources for this niche."
+                    )
+                if tried:
+                    log.warning(
+                        f"auto-pick: succeeded on niche {active_niche!r} "
+                        f"after earlier rejections — "
+                        f"{', '.join(f'{n} ({r})' for n, r in tried)}"
+                    )
+                _record_picker_choice(active_niche, topic, url)
+                return topic, total_cost, cost_source
+            last_failure = f"no qualifying story in {window_hours}h window"
+
+        log.warning(
+            f"auto-pick: niche {active_niche!r} rejected (24h + 72h windows "
+            f"both empty within allowlist) — advancing to next niche"
+        )
+        tried.append((active_niche, last_failure))
+
+    tried_summary = "; ".join(f"{n}: {r}" for n, r in tried)
     raise RuntimeError(
         f"auto-pick: picker model {PICKER_MODEL} could not find a real story "
-        f"in the last 72h within source allowlist {sorted(allowed)} for niche "
-        f"{active_niche!r} ({last_failure}). Pass --topic explicitly, widen "
-        f"the allowlist, or set PICKER_MODEL to a different web-search model. "
+        f"in the last 72h for any of the {len(tried)} niche(s) attempted "
+        f"this slot ({tried_summary}). Pass --topic explicitly, widen the "
+        f"allowlists, or set PICKER_MODEL to a different web-search model. "
         f"(cost spent: ${total_cost:.5f})"
     )
 
