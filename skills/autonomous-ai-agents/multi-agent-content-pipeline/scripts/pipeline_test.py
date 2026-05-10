@@ -1426,6 +1426,28 @@ def _publer_upload(local_path: str, mime: str) -> str:
     return r.json()["id"]
 
 
+def _publer_verify_post_created(account_id: str, text_snippet: str, job_id: str, timeout_s: int = 30) -> None:
+    # Guards against Publer's silent-drop mode: /posts/schedule returns 200 +
+    # job_id and /job_status later reports "complete" even when no Post object
+    # was ever created (observed 2026-05-10 18:34 UTC during a Publer-side
+    # rate-limit window — 4 platforms stuck pending forever, watcher snippet-
+    # matching against a post that didn't exist). Raise if the post hasn't
+    # materialized; the caller (_schedule_one) converts that to FAILED: so
+    # the watcher finalises the row instead of looping.
+    if not job_id or job_id.startswith("FAILED"):
+        return
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _publer_post_id_from_job(job_id) or _publer_find_post_id(account_id, text_snippet):
+            return
+        time.sleep(3)
+    raise RuntimeError(
+        f"Publer accepted schedule job_id={job_id} but no Post object appeared "
+        f"in /posts within {timeout_s}s — silent drop (rate-limit?). "
+        f"Refusing to enqueue a phantom row."
+    )
+
+
 def _publer_schedule(provider: str, account_id: str, post_type: str, text: str, media_ids: list[str]) -> str:
     # Publer interprets timezone-less ISO timestamps as UTC. Use UTC explicitly.
     when = (datetime.now(timezone.utc) + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -1451,7 +1473,9 @@ def _publer_schedule(provider: str, account_id: str, post_type: str, text: str, 
     )
     if r.status_code != 200:
         raise RuntimeError(f"Publer schedule failed {r.status_code}: {r.text[:300]}")
-    return r.json()["job_id"]
+    job_id = r.json()["job_id"]
+    _publer_verify_post_created(account_id, text, job_id)
+    return job_id
 
 
 def _publer_schedule_thread(
@@ -1497,7 +1521,9 @@ def _publer_schedule_thread(
     )
     if r.status_code != 200:
         raise RuntimeError(f"Publer thread schedule failed {r.status_code}: {r.text[:300]}")
-    return r.json()["job_id"]
+    job_id = r.json()["job_id"]
+    _publer_verify_post_created(account_id, head_text, job_id)
+    return job_id
 
 
 def _publer_post_id_from_job(job_id: str) -> str | None:
