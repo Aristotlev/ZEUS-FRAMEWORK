@@ -495,9 +495,13 @@ def main() -> int:
     p.add_argument(
         "--limit",
         type=int,
-        default=None,
+        default=1,
         metavar="N",
-        help="publish at most N rows per pass (FIFO by Notion created_time). Cron drip-feed uses 1.",
+        help="publish at most N rows per pass (FIFO by Notion created_time). "
+        "Default 1 -- the publish-ready cron fires every 30 min and ships ONE "
+        "piece per slot. Pass --limit 0 (or a larger N) to opt into batch. "
+        "On 2026-05-09 an unbounded --once drained 7 rows in one shot and "
+        "every platform got 7 duplicate Publer jobs.",
     )
     p.add_argument(
         "--max-age-hours",
