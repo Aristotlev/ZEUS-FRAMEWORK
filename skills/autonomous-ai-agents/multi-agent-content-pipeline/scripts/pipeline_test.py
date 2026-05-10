@@ -201,31 +201,47 @@ else:
 # cnbc.com, bloomberg.com, wsj.com, reuters.com, theblock.co, economist.com.
 # The replacements are all top-tier (MarketWatch is Dow Jones, AP is wire-of-
 # record, Fortune/BI/Axios/Guardian/TechCrunch are major desks).
+#
+# Expansion (2026-05-10): widened thin niches after a forex slot lost the
+# ~06:00 cron tick — picker found two candidates, both off the 5-domain list,
+# slot dropped. Additions below are all (a) datacenter-IP friendly per spot
+# checks, (b) carry parseable <meta property="article:published_time"> or
+# JSON-LD datePublished, (c) aren't behind a hard paywall. Skipped:
+# theinformation.com / foreignpolicy.com (paywalled), semianalysis.com
+# (Substack, no consistent pub-date metadata).
 DEFAULT_SOURCES_BY_NICHE: dict[str, list[str]] = {
     "finance": [
         "finance.yahoo.com", "ft.com", "marketwatch.com",
         "businessinsider.com", "fortune.com", "axios.com",
         "investing.com", "barrons.com",
+        "pymnts.com", "finextra.com",
     ],
     "stocks": [
         "finance.yahoo.com", "marketwatch.com", "seekingalpha.com",
         "businessinsider.com", "investing.com", "fortune.com",
         "barrons.com",
+        "benzinga.com", "nasdaq.com",
     ],
     "forex": [
         "ft.com", "marketwatch.com", "investing.com",
         "businessinsider.com", "axios.com",
+        "fxstreet.com", "dailyfx.com", "forexlive.com", "kitco.com",
     ],
     "crypto": [
         "coindesk.com", "decrypt.co", "cointelegraph.com",
+        "bitcoinmagazine.com", "cryptoslate.com", "blockworks.co",
+        "dlnews.com",
     ],
     "geopolitics": [
         "aljazeera.com", "bbc.com", "ft.com", "apnews.com",
         "dw.com", "theguardian.com",
+        "france24.com", "politico.eu", "npr.org",
     ],
     "ai_economy": [
         "newsdigest.ai", "techcrunch.com", "theverge.com",
         "venturebeat.com", "arstechnica.com", "axios.com",
+        "wired.com", "technologyreview.com", "theregister.com",
+        "restofworld.org",
     ],
 }
 

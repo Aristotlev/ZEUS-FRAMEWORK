@@ -9,7 +9,7 @@ Idempotent: removes any existing ``zeus-content-*`` jobs before recreating,
 so re-running this updates the prompts/schedules without duplicating.
 
 Active cron jobs (2026-05-09):
-  1. zeus-content-article-slot       — 24×/day on "0 * * * *": auto-pick
+  1. zeus-content-article-slot       — 12×/day on "0 */2 * * *": auto-pick
      a fresh past-72h headline, generate + publish one long-form article.
   2. zeus-content-ideas-ingest       — daily 06:00 UTC: drain Notion Ideas
      DB into the chosen content type and queue for publish.
@@ -265,11 +265,13 @@ def _build_jobs(niche: List[str]):
     return [
         {
             "name": "zeus-content-article-slot",
-            # Hourly on the hour = 24×/day. Publer Business + native
-            # platform daily caps (~150/day each on FB/IG/LI/TT/X) leave
-            # plenty of headroom; we were leaving capacity on the table
-            # at 12/day.
-            "schedule": "0 * * * *",
+            # Every 2h on the hour = 12×/day. Reverted from 24/day per
+            # user (2026-05-10): hourly was over-saturating the timeline
+            # without proportional engagement gain, while still costing
+            # full API spend per slot. 12/day = 2/niche/day across the
+            # 6-niche rotation, comfortably below platform caps and leaves
+            # room for ideas-ingest + publish-ready bursts.
+            "schedule": "0 */2 * * *",
             "prompt": article_slot,
         },
         {
