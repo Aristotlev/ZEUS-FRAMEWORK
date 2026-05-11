@@ -107,11 +107,11 @@ def generate_avatar_video(
     script: str,
     avatar_id: Optional[str] = None,
     voice_id: Optional[str] = None,
-    aspect_ratio: Literal["9:16", "16:9", "1:1"] = "9:16",
+    aspect_ratio: Optional[Literal["9:16", "16:9", "1:1", "4:5"]] = None,
     avatar_style: str = "normal",
     background_color: str = "#FAFAFA",
-    tier: Literal["avatar_iii", "avatar_iv"] = "avatar_iii",
-    resolution: Literal["1080p", "4k"] = "1080p",
+    tier: Optional[Literal["avatar_iii", "avatar_iv"]] = None,
+    resolution: Optional[Literal["1080p", "4k"]] = None,
     character_type: Optional[Literal["avatar", "talking_photo"]] = None,
     poll_interval_s: int = 5,
     timeout_s: int = 900,
@@ -122,14 +122,24 @@ def generate_avatar_video(
 
     Returns (video_url, cost_usd, duration_s).
 
-    avatar_id / voice_id default to HEYGEN_AVATAR_ID / HEYGEN_VOICE_ID env vars.
-    character_type defaults to HEYGEN_AVATAR_TYPE env var (else "avatar").
-    Use "talking_photo" when the id refers to an uploaded photo / Photo Avatar
-    rather than a stock or Instant Avatar.
+    Defaults come from env:
+      avatar_id      HEYGEN_AVATAR_ID
+      voice_id       HEYGEN_VOICE_ID
+      character_type HEYGEN_AVATAR_TYPE (else "avatar")
+      tier           HEYGEN_TIER        (else "avatar_iii")  -- "avatar_iv" = $4/min
+      resolution     HEYGEN_RESOLUTION  (else "1080p")
+      aspect_ratio   HEYGEN_ASPECT_RATIO (else "9:16")       -- 4:5 = 1080x1350
     """
     avatar_id = avatar_id or os.getenv("HEYGEN_AVATAR_ID")
     voice_id = voice_id or os.getenv("HEYGEN_VOICE_ID")
     character_type = character_type or os.getenv("HEYGEN_AVATAR_TYPE") or "avatar"
+    tier = tier or os.getenv("HEYGEN_TIER") or "avatar_iii"
+    resolution = resolution or os.getenv("HEYGEN_RESOLUTION") or "1080p"
+    aspect_ratio = aspect_ratio or os.getenv("HEYGEN_ASPECT_RATIO") or "9:16"
+    if tier not in ("avatar_iii", "avatar_iv"):
+        raise HeyGenError(f"unknown HEYGEN_TIER={tier!r} (expected 'avatar_iii' or 'avatar_iv')")
+    if resolution not in ("1080p", "4k"):
+        raise HeyGenError(f"unknown HEYGEN_RESOLUTION={resolution!r} (expected '1080p' or '4k')")
     if character_type not in ("avatar", "talking_photo"):
         raise HeyGenError(f"unknown HEYGEN_AVATAR_TYPE={character_type!r} (expected 'avatar' or 'talking_photo')")
     if not avatar_id:
@@ -141,8 +151,12 @@ def generate_avatar_video(
         width, height = 1080, 1920
     elif aspect_ratio == "16:9":
         width, height = 1920, 1080
-    else:
+    elif aspect_ratio == "4:5":
+        width, height = 1080, 1350
+    elif aspect_ratio == "1:1":
         width, height = 1080, 1080
+    else:
+        raise HeyGenError(f"unknown HEYGEN_ASPECT_RATIO={aspect_ratio!r} (expected '9:16', '4:5', '1:1', '16:9')")
 
     if character_type == "talking_photo":
         character = {
