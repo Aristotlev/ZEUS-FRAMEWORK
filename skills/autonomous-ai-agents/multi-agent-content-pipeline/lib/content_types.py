@@ -7,15 +7,16 @@ Seven types:
   Carousel         — 3-5 slide images + long description, 4 platforms (Twitter/IG/LI/TT)
   ShortVideo       — 1080x1920, <90s, 5 platforms (+YouTube Shorts)
   LongVideo        — 1920x1080, 4 platforms (YouTube/Twitter/LinkedIn/Reddit)
-  ShortVideoAvatar — 1080x1920, <90s, talking-head presenter overlay (NOT YET IMPLEMENTED)
-  LongVideoAvatar  — 1920x1080, presenter-led explainer (NOT YET IMPLEMENTED)
+  ShortVideoAvatar — 1080x1920, <90s, FLUX-LoRA character + Hedra (talking) or Kling i2v (scene)
+  LongVideoAvatar  — 1920x1080, FLUX-LoRA character + Hedra (talking) or Kling i2v (scene)
 
-The two avatar types are SCAFFOLDED ONLY — provider (Hedra/HeyGen/D-ID/etc.)
-and presenter persona are still TBD. The orchestrator in pipeline_test.py
-raises NotImplementedError if you pass --type short_video_avatar / long_video_avatar
-until the generation pipeline is wired. Keeping the enum + platform map +
-validation rules in place now lets us evolve the rest of the codebase
-(Notion schema, cron, cost ledger) without enum churn later.
+Avatar pipeline (added 2026-05-09):
+  Character + environment consistency comes from a one-time-config persona at
+  $HERMES_HOME/.hermes/avatar_persona.json (FLUX-LoRA URL + trigger word +
+  style prefix). Run scripts/train_avatar_lora.py once per character to
+  populate it. After that, every avatar run anchors its first frame on the
+  trained LoRA — Hedra lip-syncs talking-head shots, Kling i2v animates
+  in-scene b-roll. Pass --avatar-mode talking|scene to pick the path.
 
 ContentPiece is the single dataclass that flows through fal -> Publer -> Notion.
 """
@@ -49,18 +50,16 @@ class AudioMode(str, Enum):
 
 
 PLATFORMS_BY_TYPE: dict[ContentType, list[str]] = {
-    # tiktok dropped from articles 2026-05-10: TikTok's OpenAPI cap is
-    # ~10–12 posts/24h per creator; at 12 article slots/day every fire
-    # was getting rate-limited, leaving the watcher waiting on a
-    # platform that would never go live. Short videos / carousels still
-    # include tiktok — their cadence is far below the cap.
+    # tiktok is video-only: dropped from articles 2026-05-10 (OpenAPI ~10–12
+    # posts/24h cap), then removed from carousels 2026-05-11. TikTok stays on
+    # SHORT_VIDEO + SHORT_VIDEO_AVATAR only — image content goes elsewhere.
     ContentType.ARTICLE: ["twitter", "instagram", "linkedin", "facebook"],
     ContentType.LONG_ARTICLE: ["twitter", "instagram", "linkedin", "facebook"],
     # reddit is wired here for FUTURE Publer integration. If PUBLER_REDDIT_ID
     # is unset, `_schedule_one` skips it with a "no PUBLER_*_ID configured"
     # warning and never sends a request. When the account gets connected
     # later, no code change is needed — set the env var and it starts posting.
-    ContentType.CAROUSEL: ["twitter", "instagram", "linkedin", "tiktok", "facebook", "reddit"],
+    ContentType.CAROUSEL: ["twitter", "instagram", "linkedin", "facebook", "reddit"],
     ContentType.SHORT_VIDEO: ["twitter", "instagram", "linkedin", "tiktok", "youtube", "facebook"],
     ContentType.LONG_VIDEO: ["youtube", "twitter", "linkedin", "reddit"],
     # Avatar types share platform targets with their non-avatar siblings.
