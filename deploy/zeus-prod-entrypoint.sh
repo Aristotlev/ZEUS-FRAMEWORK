@@ -122,6 +122,13 @@ terminal:
   backend: local
   timeout: 180
   persistent_shell: true
+  # Hermes strips category=tool secrets (TAVILY_API_KEY, etc.) from execute_code
+  # subprocess env by default. The content pipeline's grounding phase runs
+  # pipeline_test.py via execute_code and needs Tavily live — without the
+  # allowlist, _tavily_cross_sources() silently returns [] and the writer
+  # loses cross-outlet grounding. MARKETAUX_API_KEY is not in the blocklist.
+  env_passthrough:
+    - TAVILY_API_KEY
 
 memory:
   memory_enabled: true
