@@ -1379,12 +1379,17 @@ def generate_media_for(
     slides: int = 4,
     video_seconds: int = 5,
     quality_override: Optional[str] = None,
+    avatar_mode: str = "talking",
 ) -> None:
     """Dispatch media generation by content type. Mutates `piece` in place.
 
     quality_override: if set ('low'|'medium'|'high'), replaces the per-type
     default quality from IMAGE_SPECS. 'low' is great for carousel iteration
     (~$0.005/slide vs $0.04), 'high' for marketing-grade ship quality (~$0.16).
+
+    avatar_mode: 'talking' = FLUX-LoRA face still → Hedra lip-sync (default).
+                 'scene'   = FLUX-LoRA in-scene still → Kling i2v b-roll.
+    Only consulted for short_video_avatar / long_video_avatar.
     """
     out_dir = _local_dir(piece)
     if piece.content_type in (ContentType.ARTICLE, ContentType.LONG_ARTICLE):
@@ -1395,6 +1400,10 @@ def generate_media_for(
         _gen_video(piece, out_dir, aspect="9:16", duration=min(video_seconds, 10))
     elif piece.content_type == ContentType.LONG_VIDEO:
         _gen_video(piece, out_dir, aspect="16:9", duration=min(video_seconds, 10))
+    elif piece.content_type == ContentType.SHORT_VIDEO_AVATAR:
+        _gen_avatar_video(piece, out_dir, aspect="9:16", duration=min(video_seconds, 10), mode=avatar_mode)
+    elif piece.content_type == ContentType.LONG_VIDEO_AVATAR:
+        _gen_avatar_video(piece, out_dir, aspect="16:9", duration=min(video_seconds, 10), mode=avatar_mode)
     piece.status = "media_generated"
 
 
@@ -1687,6 +1696,179 @@ def _gen_video(piece: ContentPiece, out_dir: pathlib.Path, aspect: str, duration
             src = "actual" if model.startswith("fish-audio") else "estimate"
             piece.add_cost(model, model_cost, kind="audio", source=src)
         ledger_checkpoint(piece, "audio_mixed")
+
+
+def _gen_avatar_video(
+    piece: ContentPiece, out_dir: pathlib.Path, aspect: str, duration: int, mode: str = "talking",
+) -> None:
+    """
+    Generate a video featuring the trained avatar persona.
+
+    'talking' mode: front-facing FLUX-LoRA still + fish.audio TTS → Hedra lip-sync.
+                    Output duration = narration duration (Hedra ignores `duration`).
+    'scene'   mode: in-scene FLUX-LoRA still → Kling i2v b-roll.
+                    Output duration = `duration` arg.
+    'heygen'  mode: HeyGen v2 — pre-trained HeyGen avatar + voice render the
+                    full clip in one call. Bypasses the FLUX-LoRA / Hedra stack.
+                    Requires HEYGEN_API_KEY + HEYGEN_AVATAR_ID + HEYGEN_VOICE_ID.
+
+    Character + environment consistency comes from the LoRAs in the persona
+    file (one-time-config). Every still — talking or scene — is anchored by
+    the same character LoRA, so identity stays locked across runs. HeyGen mode
+    is an alternative path that uses HeyGen's own avatar library instead.
+    """
+    from lib import (
+        AvatarPersonaError,
+        fal_upload_local_file,
+        generate_image_flux_lora,
+        generate_video_hedra,
+        generate_video_kling_i2v,
+        load_avatar_persona,
+    )
+    from lib.fish import synthesize as fish_synthesize
+
+    width, height = (1080, 1920) if aspect == "9:16" else (1920, 1080)
+
+    if mode == "heygen":
+        from lib import HeyGenError, heygen_generate_avatar_video, heygen_download
+        log.info(f"  avatar(heygen): submitting script ({width}x{height})")
+        try:
+            url, video_cost, hg_duration = heygen_generate_avatar_video(
+                script=piece.body,
+                aspect_ratio=aspect,  # type: ignore[arg-type]
+                run_id=piece.run_id,
+            )
+        except HeyGenError as e:
+            raise RuntimeError(f"heygen render failed: {e}")
+        local = heygen_download(url, str(out_dir / "video.mp4"))
+        piece.video = GeneratedAsset(
+            url=url, kind="video", width=width, height=height,
+            duration_s=hg_duration, model="heygen-avatar_iii",
+            cost_usd=video_cost, local_path=local,
+        )
+        piece.add_cost("heygen-avatar_iii", video_cost, kind="video", source="estimate")
+        ledger_checkpoint(piece, "avatar_video_generated")
+        return
+
+    try:
+        persona = load_avatar_persona()
+    except AvatarPersonaError as e:
+        raise RuntimeError(
+            f"avatar persona not configured. {e} "
+            f"Run scripts/train_avatar_lora.py first to create one."
+        )
+
+    if mode == "talking":
+        # Step 1: FLUX-LoRA front-facing portrait — locked character identity.
+        prompt = persona.build_prompt(
+            scene_description=f"in a setting that fits this story: {piece.topic}",
+            talking_head=True,
+        )
+        log.info(f"  avatar(talking): FLUX-LoRA face still ({width}x{height})")
+        # Hedra prefers a roughly square or portrait input; we generate at the
+        # final aspect to skip a crop, but Hedra will letterbox/crop as needed.
+        face_url, image_cost = generate_image_flux_lora(
+            prompt=prompt,
+            lora_url=persona.character_lora_url,
+            negative_prompt=persona.negative_prompt,
+            width=width, height=height,
+            run_id=piece.run_id,
+        )
+        face_local = download(face_url, str(out_dir / "avatar_face.png"))
+        piece.images.append(GeneratedAsset(
+            url=face_url, kind="image", width=width, height=height,
+            model="flux-lora", cost_usd=image_cost, local_path=face_local,
+        ))
+        piece.add_cost("flux-lora", image_cost, kind="image", source="estimate")
+        ledger_checkpoint(piece, "avatar_face_generated")
+
+        # Step 2: fish.audio narration → upload to fal → Hedra lip-sync.
+        log.info("  avatar(talking): fish.audio TTS")
+        narration_path, narration_cost = fish_synthesize(
+            piece.body, str(out_dir / "narration.mp3"), run_id=piece.run_id,
+        )
+        # fish bills per character — that IS the billing primitive.
+        piece.add_cost("fish-audio/s1", narration_cost, kind="audio", source="actual")
+        ledger_checkpoint(piece, "avatar_narration_generated")
+
+        log.info("  avatar(talking): Hedra lip-sync")
+        audio_url = fal_upload_local_file(narration_path)
+        url, video_cost, hedra_duration = generate_video_hedra(
+            image_url=face_url,
+            audio_url=audio_url,
+            aspect_ratio=aspect,  # type: ignore[arg-type]
+            run_id=piece.run_id,
+        )
+        # Hedra duration tracks audio. Fall back to ffprobe if response omits it.
+        if not hedra_duration:
+            try:
+                from lib.audio_mix import _probe_duration  # type: ignore
+                hedra_duration = _probe_duration(narration_path) or float(duration)
+            except Exception:
+                hedra_duration = float(duration)
+        local = download(url, str(out_dir / "video.mp4"))
+        piece.video = GeneratedAsset(
+            url=url, kind="video", width=width, height=height,
+            duration_s=hedra_duration, model="hedra-character-2",
+            cost_usd=video_cost, local_path=local,
+        )
+        piece.add_cost("hedra-character-2", video_cost, kind="video", source="estimate")
+        ledger_checkpoint(piece, "avatar_video_generated")
+        # Note: narration is already baked into the Hedra render. Background
+        # music overlay (audio_mode=music_narration) is a future enhancement —
+        # would require a music-only mix that doesn't re-synthesize narration.
+        return
+
+    if mode == "scene":
+        # Step 1: FLUX-LoRA in-scene still (character + environment).
+        prompt = persona.build_prompt(scene_description=piece.body[:400])
+        log.info(f"  avatar(scene): FLUX-LoRA scene still ({width}x{height})")
+        scene_url, image_cost = generate_image_flux_lora(
+            prompt=prompt,
+            lora_url=persona.character_lora_url,
+            negative_prompt=persona.negative_prompt,
+            width=width, height=height,
+            run_id=piece.run_id,
+        )
+        scene_local = download(scene_url, str(out_dir / "avatar_scene.png"))
+        piece.images.append(GeneratedAsset(
+            url=scene_url, kind="image", width=width, height=height,
+            model="flux-lora", cost_usd=image_cost, local_path=scene_local,
+        ))
+        piece.add_cost("flux-lora", image_cost, kind="image", source="estimate")
+        ledger_checkpoint(piece, "avatar_scene_generated")
+
+        # Step 2: Kling i2v animates the locked frame.
+        log.info("  avatar(scene): Kling i2v")
+        prompt_motion = piece.body[:600]
+        url, video_cost = generate_video_kling_i2v(
+            prompt=prompt_motion, image_url=scene_url, aspect_ratio=aspect,  # type: ignore[arg-type]
+            duration_s=duration, run_id=piece.run_id,
+        )
+        local = download(url, str(out_dir / "video.mp4"))
+        piece.video = GeneratedAsset(
+            url=url, kind="video", width=width, height=height,
+            duration_s=duration, model="kling-v2.5-turbo-pro-i2v",
+            cost_usd=video_cost, local_path=local,
+        )
+        piece.add_cost("kling-v2.5-turbo-pro-i2v", video_cost, kind="video", source="estimate")
+        ledger_checkpoint(piece, "avatar_video_generated")
+
+        # Scene-mode is silent — bg music + narration via the standard mixer.
+        if piece.audio_mode:
+            local_video = piece.video.local_path
+            final_path, audio_costs = mix_audio_for_video(
+                piece, local_video, str(out_dir), narration_text=piece.body,
+            )
+            if final_path != local_video:
+                piece.video.local_path = final_path
+            for model, model_cost in audio_costs.items():
+                src = "actual" if model.startswith("fish-audio") else "estimate"
+                piece.add_cost(model, model_cost, kind="audio", source=src)
+            ledger_checkpoint(piece, "audio_mixed")
+        return
+
+    raise ValueError(f"unknown avatar mode: {mode!r} (expected 'talking', 'scene', or 'heygen')")
 
 
 # ---------------------------------------------------------------------------
@@ -2205,6 +2387,7 @@ def run(
     wait_for_live: bool = False,
     quality: Optional[str] = None,
     picker_cost: Optional[tuple[float, str]] = None,
+    avatar_mode: str = "talking",
     source_url: str = "",
     source_niche: str = "",
 ) -> ContentPiece:
@@ -2282,7 +2465,7 @@ def run(
     media_error: Exception | None = None
     with _Phase(piece, "media_gen"):
         try:
-            generate_media_for(piece, slides=slides, video_seconds=duration, quality_override=quality)
+            generate_media_for(piece, slides=slides, video_seconds=duration, quality_override=quality, avatar_mode=avatar_mode)
             log.info(
                 f"  media -> images={len(piece.images)} video={'yes' if piece.video else 'no'} cost=${piece.total_cost:.3f} "
                 f"took={piece.phase_durations_ms.get('media_gen', 0)}ms"
@@ -2437,6 +2620,16 @@ def main() -> int:
         default=None,
         help="Audio mode for videos: music_only, music_narration, narration_primary",
     )
+    p.add_argument(
+        "--avatar-mode",
+        choices=["talking", "scene", "heygen"],
+        default="talking",
+        help="For short_video_avatar / long_video_avatar runs: 'talking' = "
+             "FLUX-LoRA face still + Hedra lip-sync (default). 'scene' = "
+             "FLUX-LoRA in-scene still + Kling i2v b-roll (no lip-sync). "
+             "'heygen' = HeyGen v2 pre-trained avatar + voice in one call "
+             "(needs HEYGEN_API_KEY/AVATAR_ID/VOICE_ID).",
+    )
     p.add_argument("--publish", action="store_true", help="Also post to Publer (default: archive only)")
     p.add_argument(
         "--wait-for-live", action="store_true",
@@ -2461,17 +2654,20 @@ def main() -> int:
         return 2
 
     audio_mode = AudioMode(args.audio_mode) if args.audio_mode else None
-    if audio_mode and args.type not in ("short_video", "long_video"):
+    video_types = ("short_video", "long_video", "short_video_avatar", "long_video_avatar")
+    if audio_mode and args.type not in video_types:
         log.warning(f"--audio-mode only applies to video types, ignoring for {args.type}")
         audio_mode = None
-
-    if args.type in ("short_video_avatar", "long_video_avatar"):
-        log.error(
-            f"--type {args.type} is scaffolded in the taxonomy but the generation "
-            f"pipeline is not yet wired (avatar provider + presenter persona TBD). "
-            f"Pick one of: article, long_article, carousel, short_video, long_video."
+    # Talking-head avatar bakes narration into the Hedra render, so a separate
+    # narration mix is redundant. Music-only would need a narration-skipping
+    # mixer path that doesn't exist yet — warn rather than silently mis-mix.
+    if args.type in ("short_video_avatar", "long_video_avatar") and args.avatar_mode in ("talking", "heygen") and audio_mode:
+        log.warning(
+            f"--audio-mode is ignored for avatar {args.avatar_mode} runs (provider bakes "
+            f"voice into the render). Use --avatar-mode scene if you need "
+            f"the standard music+narration mixer."
         )
-        return 3
+        audio_mode = None
 
     try:
         source_url = ""
@@ -2501,6 +2697,7 @@ def main() -> int:
             wait_for_live=args.wait_for_live,
             quality=args.quality,
             picker_cost=picker_cost,
+            avatar_mode=args.avatar_mode,
             source_url=source_url,
             source_niche=source_niche,
         )

@@ -124,6 +124,43 @@ def _request(method: str, path: str, *, json_body: Optional[dict] = None, timeou
         return {}
 
 
+_ADMIN_USER_ID: Optional[int] = None
+
+
+def _admin_user_id() -> int:
+    """Return the publication's admin user id, used as the draft byline.
+
+    Substack's /api/v1/drafts rejects with 400 `draft_bylines: Invalid value`
+    when the field is missing — the web app always sends at least one byline.
+    We pick the `role: admin` user from /api/v1/publication/users (cached for
+    the process lifetime; the admin doesn't change between runs).
+    """
+    global _ADMIN_USER_ID
+    if _ADMIN_USER_ID is not None:
+        return _ADMIN_USER_ID
+    users = _request_list("GET", "/api/v1/publication/users")
+    admin = next((u for u in users if u.get("role") == "admin"), None)
+    if not admin or not isinstance(admin.get("id"), int):
+        raise SubstackError(f"No admin user found in /publication/users: {str(users)[:200]}")
+    _ADMIN_USER_ID = admin["id"]
+    return _ADMIN_USER_ID
+
+
+def _request_list(method: str, path: str, *, timeout: int = 30) -> list:
+    """Variant of _request for endpoints that return a JSON list at the top
+    level — _request() assumes a dict and would coerce the response away.
+    """
+    url = f"{_publication_url()}{path}"
+    r = requests.request(method, url, headers=_headers(), cookies=_cookies(), timeout=timeout)
+    if r.status_code in (401, 403):
+        raise SubstackAuthError(
+            f"Substack returned {r.status_code} on {path} — substack.sid likely expired."
+        )
+    if r.status_code >= 400:
+        raise SubstackError(f"Substack {method} {path} failed {r.status_code}: {r.text[:300]}")
+    return r.json()
+
+
 def _prosemirror_body(text: str) -> str:
     """Convert plain prose with \\n\\n paragraph breaks to a stringified
     ProseMirror doc. Empty paragraphs are dropped so a trailing newline
@@ -164,6 +201,7 @@ def publish_post(
         "draft_body": _prosemirror_body(body),
         "audience": audience,
         "type": "newsletter",
+        "draft_bylines": [{"id": _admin_user_id()}],
     }
     if cover_image_url:
         # Substack stores the cover image on a separate field; the API accepts

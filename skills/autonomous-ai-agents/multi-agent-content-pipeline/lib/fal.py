@@ -114,6 +114,21 @@ def kling_cost(duration_s: float) -> float:
     return KLING_BASE_PRICE + (duration_s - KLING_BASE_SECONDS) * KLING_PER_SECOND_AFTER
 
 
+# FLUX-LoRA inference (fal-ai/flux-lora). Pricing scales by megapixels;
+# ~$0.035/MP at standard step count. Standard 1024x1024 ≈ $0.035, portrait
+# 1024x1536 ≈ $0.052. Real cost is reported by fal on most jobs and upgrades
+# to source="actual" via _extract_fal_cost — this is the fallback estimate.
+FLUX_LORA_PRICE_PER_MP = 0.035
+
+# FLUX-LoRA fast training (fal-ai/flux-lora-fast-training). Conservative
+# placeholder; real cost is reported by fal on training completion.
+FLUX_LORA_TRAIN_PRICE = 2.00
+
+# Hedra Character-2 talking-head (fal-ai/hedra/character-2). Per-second pricing.
+# Conservative placeholder; real cost is reported by fal on most jobs.
+HEDRA_PRICE_PER_SECOND = 0.10
+
+
 class FalError(RuntimeError):
     pass
 
@@ -377,6 +392,192 @@ def generate_music(
         response_excerpt={k: result.get(k) for k in ("metrics", "pricing", "cost") if isinstance(result, dict) and k in result},
     )
     return url, cost
+
+
+def generate_image_flux_lora(
+    prompt: str,
+    lora_url: str,
+    lora_scale: float = 1.0,
+    width: int = 1024,
+    height: int = 1024,
+    num_inference_steps: int = 28,
+    guidance_scale: float = 3.5,
+    negative_prompt: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> tuple[str, float]:
+    """
+    FLUX.1 [dev] inference with a custom LoRA applied. This is the
+    character-consistency anchor: every avatar still must originate here so
+    the LoRA-trained character/environment is locked in before any video
+    model touches the frame. Returns (image_url, cost_usd).
+
+    `lora_url` is the .safetensors URL produced by `train_flux_lora` (or any
+    fal/HF-hosted LoRA). `lora_scale` 1.0 is the trained strength; lower
+    values (0.6-0.8) loosen identity if the trained look is overfit.
+    """
+    client = _client()
+    arguments: dict = {
+        "prompt": prompt,
+        "image_size": {"width": width, "height": height},
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
+        "num_images": 1,
+        "loras": [{"path": lora_url, "scale": lora_scale}],
+    }
+    if negative_prompt:
+        arguments["negative_prompt"] = negative_prompt
+    log.info(
+        f"fal image (FLUX-LoRA): {width}x{height} scale={lora_scale} "
+        f"-- {prompt[:60]} lora={lora_url[:60]}..."
+    )
+    result = client.subscribe("fal-ai/flux-lora", arguments=arguments, client_timeout=300)
+    images = result.get("images") if isinstance(result, dict) else None
+    url = images[0].get("url") if images and isinstance(images[0], dict) else None
+    if not url:
+        raise FalError(f"FLUX-LoRA returned no image: {result}")
+    actual_cost, _ = _extract_fal_cost(result if isinstance(result, dict) else {})
+    if actual_cost is not None:
+        cost, cost_source = actual_cost, "actual"
+    else:
+        megapixels = (width * height) / 1_000_000
+        cost = round(megapixels * FLUX_LORA_PRICE_PER_MP, 4)
+        cost_source = "estimate"
+    _log_fal_call(
+        run_id=run_id,
+        model="flux-lora",
+        request_id=(result.get("request_id") if isinstance(result, dict) else None),
+        declared_cost_usd=cost,
+        cost_source=cost_source,
+        inputs={
+            "width": width, "height": height, "lora_scale": lora_scale,
+            "lora_url": lora_url[:200], "prompt_excerpt": prompt[:200],
+        },
+        response_excerpt={k: result.get(k) for k in ("seed", "metrics", "pricing", "cost") if isinstance(result, dict) and k in result},
+    )
+    return url, cost
+
+
+def train_flux_lora(
+    image_urls: list[str],
+    trigger_word: str,
+    steps: int = 1000,
+    create_masks: bool = True,
+    is_style: bool = False,
+    run_id: Optional[str] = None,
+) -> tuple[str, float]:
+    """
+    One-shot FLUX-LoRA fast training. This is the "one-time configuration"
+    step that locks in a character (or an environment style). Pass 15-30
+    image URLs of the same subject in varied poses/lighting, plus a unique
+    trigger word that you'll later include in every inference prompt. Set
+    `is_style=True` for environment/aesthetic LoRAs (skips the subject
+    masking step). Returns (lora_safetensors_url, cost_usd).
+
+    The returned URL goes into avatar_persona.json — every short_video_avatar
+    run reads it and applies it via generate_image_flux_lora.
+    """
+    if len(image_urls) < 4:
+        raise FalError(f"FLUX-LoRA training needs at least 4 images, got {len(image_urls)}")
+    client = _client()
+    # fal expects a zip of training images; the SDK accepts a list of URLs
+    # via `images_data_url` when the helper has prebuilt one. The training
+    # endpoint also accepts inline `images` in some shapes. We pass the
+    # canonical list-of-urls payload.
+    arguments: dict = {
+        "images_data_url": image_urls if len(image_urls) > 1 else image_urls[0],
+        "trigger_word": trigger_word,
+        "steps": steps,
+        "create_masks": create_masks if not is_style else False,
+        "is_style": is_style,
+    }
+    log.info(
+        f"fal LoRA training: trigger={trigger_word!r} steps={steps} "
+        f"images={len(image_urls)} is_style={is_style}"
+    )
+    result = client.subscribe(
+        "fal-ai/flux-lora-fast-training", arguments=arguments, client_timeout=1800,
+    )
+    diffusers = result.get("diffusers_lora_file") if isinstance(result, dict) else None
+    lora_url = diffusers.get("url") if isinstance(diffusers, dict) else None
+    if not lora_url:
+        raise FalError(f"LoRA training returned no .safetensors URL: {result}")
+    actual_cost, _ = _extract_fal_cost(result if isinstance(result, dict) else {})
+    if actual_cost is not None:
+        cost, cost_source = actual_cost, "actual"
+    else:
+        cost, cost_source = FLUX_LORA_TRAIN_PRICE, "estimate"
+    _log_fal_call(
+        run_id=run_id,
+        model="flux-lora-fast-training",
+        request_id=(result.get("request_id") if isinstance(result, dict) else None),
+        declared_cost_usd=cost,
+        cost_source=cost_source,
+        inputs={
+            "trigger_word": trigger_word, "steps": steps,
+            "image_count": len(image_urls), "is_style": is_style,
+        },
+        response_excerpt={k: result.get(k) for k in ("config_file", "metrics", "pricing", "cost") if isinstance(result, dict) and k in result},
+    )
+    return lora_url, cost
+
+
+def generate_video_hedra(
+    image_url: str,
+    audio_url: str,
+    aspect_ratio: Literal["9:16", "16:9", "1:1"] = "9:16",
+    resolution: Literal["540p", "720p"] = "720p",
+    run_id: Optional[str] = None,
+) -> tuple[str, float, float]:
+    """
+    Hedra Character-2 talking-head: lip-syncs `image_url` (a face still,
+    typically from generate_image_flux_lora) to `audio_url` (typically a
+    fish.audio TTS render uploaded via upload_local_file). Output duration
+    matches audio duration. Returns (video_url, cost_usd, duration_s).
+
+    Image-to-video models like Kling don't do lip-sync; this is the path for
+    "character speaks to camera" content. For non-talking b-roll, prefer
+    generate_video_kling_i2v which is cheaper and higher motion fidelity.
+    """
+    client = _client()
+    arguments: dict = {
+        "image_url": image_url,
+        "audio_url": audio_url,
+        "aspect_ratio": aspect_ratio,
+        "resolution": resolution,
+    }
+    log.info(
+        f"fal video (Hedra C2): {aspect_ratio} {resolution} "
+        f"face={image_url[:60]}... audio={audio_url[:60]}..."
+    )
+    result = client.subscribe(
+        "fal-ai/hedra/character-2", arguments=arguments, client_timeout=900,
+    )
+    video = result.get("video") if isinstance(result, dict) else None
+    url = video.get("url") if isinstance(video, dict) else None
+    if not url:
+        raise FalError(f"Hedra returned no video: {result}")
+    duration_s = 0.0
+    if isinstance(video, dict):
+        duration_s = float(video.get("duration") or video.get("duration_s") or 0.0)
+    actual_cost, _ = _extract_fal_cost(result if isinstance(result, dict) else {})
+    if actual_cost is not None:
+        cost, cost_source = actual_cost, "actual"
+    else:
+        cost = round(max(duration_s, 1.0) * HEDRA_PRICE_PER_SECOND, 4)
+        cost_source = "estimate"
+    _log_fal_call(
+        run_id=run_id,
+        model="hedra-character-2",
+        request_id=(result.get("request_id") if isinstance(result, dict) else None),
+        declared_cost_usd=cost,
+        cost_source=cost_source,
+        inputs={
+            "aspect_ratio": aspect_ratio, "resolution": resolution,
+            "image_url": image_url[:200], "audio_url": audio_url[:200],
+        },
+        response_excerpt={k: result.get(k) for k in ("metrics", "pricing", "cost") if isinstance(result, dict) and k in result},
+    )
+    return url, cost, duration_s
 
 
 def download(url: str, dest_path: str) -> str:

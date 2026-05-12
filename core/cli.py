@@ -1535,8 +1535,8 @@ def _build_compact_banner() -> str:
     dim_color = _skin.get_color("banner_dim", "#B8860B") if _skin else "#B8860B"
 
     if skin_name == "default":
-        line1 = "⚕ NOUS HERMES - AI Agent Framework"
-        tiny_line = "⚕ NOUS HERMES"
+        line1 = "⚡ ZEUS - AI Agent Framework"
+        tiny_line = "⚡ ZEUS"
     else:
         agent_name = _skin.get_branding("agent_name", "Zeus") if _skin else "Zeus"
         line1 = f"{agent_name} - AI Agent Framework"
@@ -7540,13 +7540,14 @@ class HermesCLI:
                 pass
 
             # Track consecutive no-speech cycles to avoid infinite restart loops.
+            _stop_continuous = False
             if not submitted:
                 self._no_speech_count = getattr(self, '_no_speech_count', 0) + 1
                 if self._no_speech_count >= 3:
                     self._voice_continuous = False
                     self._no_speech_count = 0
                     _cprint(f"{_DIM}No speech detected 3 times, continuous mode stopped.{_RST}")
-                    return
+                    _stop_continuous = True
             else:
                 self._no_speech_count = 0
 
@@ -7554,7 +7555,7 @@ class HermesCLI:
             # restart recording so the user can keep talking.
             # (When transcript IS submitted, process_loop handles restart
             # after chat() completes.)
-            if self._voice_continuous and not submitted and not self._voice_recording:
+            if not _stop_continuous and self._voice_continuous and not submitted and not self._voice_recording:
                 def _restart_recording():
                     try:
                         self._voice_start_recording()
