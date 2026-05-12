@@ -19,6 +19,12 @@ from .fal import (
     kling_cost,
 )
 from .fish import FishAudioError, synthesize as fish_synthesize
+from .substack import (
+    SubstackError,
+    SubstackAuthError,
+    publish_post as substack_publish_post,
+    publish_note as substack_publish_note,
+)
 from .notion import NotionArchive, extract_id_from_url
 from .platforms import (
     LIMITS,
@@ -69,6 +75,10 @@ __all__ = [
     "kling_cost",
     "FishAudioError",
     "fish_synthesize",
+    "SubstackError",
+    "SubstackAuthError",
+    "substack_publish_post",
+    "substack_publish_note",
     "NotionArchive",
     "extract_id_from_url",
     "LIMITS",

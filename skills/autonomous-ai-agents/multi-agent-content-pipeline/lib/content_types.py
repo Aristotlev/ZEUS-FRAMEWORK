@@ -53,8 +53,13 @@ PLATFORMS_BY_TYPE: dict[ContentType, list[str]] = {
     # tiktok is video-only: dropped from articles 2026-05-10 (OpenAPI ~10–12
     # posts/24h cap), then removed from carousels 2026-05-11. TikTok stays on
     # SHORT_VIDEO + SHORT_VIDEO_AVATAR only — image content goes elsewhere.
-    ContentType.ARTICLE: ["twitter", "instagram", "linkedin", "facebook"],
-    ContentType.LONG_ARTICLE: ["twitter", "instagram", "linkedin", "facebook"],
+    # "substack" is a virtual platform — it doesn't fan out through Publer.
+    # publish() handles it inline (ARTICLE → Substack Note, LONG_ARTICLE →
+    # Substack Post) via lib/substack.py. If SUBSTACK_CONNECT_SID is unset
+    # the inline handler skips with the same "not configured" semantics
+    # Publer platforms use, so the run still finalises cleanly.
+    ContentType.ARTICLE: ["twitter", "instagram", "linkedin", "facebook", "substack"],
+    ContentType.LONG_ARTICLE: ["twitter", "instagram", "linkedin", "facebook", "substack"],
     # reddit is wired here for FUTURE Publer integration. If PUBLER_REDDIT_ID
     # is unset, `_schedule_one` skips it with a "no PUBLER_*_ID configured"
     # warning and never sends a request. When the account gets connected

@@ -76,6 +76,8 @@ from lib import (  # noqa: E402
     GeneratedAsset,
     LIMITS,
     NotionArchive,
+    SubstackAuthError,
+    SubstackError,
     download,
     generate_image,
     generate_video_kling,
@@ -86,6 +88,8 @@ from lib import (  # noqa: E402
     publish_enqueue,
     send_pipeline_summary,
     split_thread,
+    substack_publish_note,
+    substack_publish_post,
 )
 from lib.paths import zeus_data_path  # noqa: E402
 
@@ -134,6 +138,19 @@ PUBLER_ACCOUNTS = {
     "reddit": os.getenv("PUBLER_REDDIT_ID", ""),
     "facebook": os.getenv("PUBLER_FACEBOOK_ID", ""),
 }
+
+# Substack — virtual fan-out target on article pipelines. Not routed via
+# Publer; pipeline calls lib.substack inline because Substack publishes
+# immediately and returns the live permalink in one round trip. Both env
+# vars must be set for the substack leg to fire; with either unset the
+# inline handler logs "skipping substack — not configured" and the run
+# finalises cleanly on the remaining Publer platforms.
+# SUBSTACK_SID is the value of the `substack.sid` session cookie pulled
+# from a logged-in browser. (Legacy name SUBSTACK_CONNECT_SID still works
+# via lib/substack.py's _cookie() fallback so an existing env file
+# doesn't silently break, but new setups should use SUBSTACK_SID.)
+SUBSTACK_PUBLICATION_URL = os.getenv("SUBSTACK_PUBLICATION_URL", "").strip()
+SUBSTACK_SID = (os.getenv("SUBSTACK_SID") or os.getenv("SUBSTACK_CONNECT_SID") or "").strip()
 
 # Image dimensions per content type. Carousel uses 2:3 portrait — IG, LinkedIn,
 # and TikTok all give portrait carousels noticeably more feed real estate than
@@ -1962,6 +1979,69 @@ def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 720, poll_int
             piece.publer_job_ids[f"{platform}_url"] = f"PENDING: post_id={post_id}"
 
 
+def _publish_substack(piece: ContentPiece) -> None:
+    """Publish ARTICLE/LONG_ARTICLE to Substack inline (no Publer, no watcher).
+
+    Routes:
+      ARTICLE      → Substack Note (short-form, matches its <480 char body)
+      LONG_ARTICLE → Substack Post (full draft + publish)
+
+    Writes results directly into piece.publer_job_ids:
+      publer_job_ids["substack"]     = "POSTED" | "FAILED: <reason>"
+      publer_job_ids["substack_url"] = <https://...> | "FAILED: <reason>"
+
+    The publish_watcher recognises a pre-resolved "<platform>_url" starting
+    with "http" as live and skips Publer polling for that platform, so the
+    rest of the pipeline (email, Notion, ledger) picks up Substack URLs for
+    free without a watcher tick.
+    """
+    if "substack" not in piece.target_platforms:
+        return
+    if not SUBSTACK_SID or not SUBSTACK_PUBLICATION_URL:
+        log.warning(
+            "  substack: SUBSTACK_SID/SUBSTACK_PUBLICATION_URL not set — skipping"
+        )
+        return
+
+    try:
+        if piece.content_type == ContentType.ARTICLE:
+            url = substack_publish_note(piece.body)
+            log.info(f"  -> substack note live: {url}")
+        else:
+            # LONG_ARTICLE — full post. Subtitle defaults to topic when the
+            # writer didn't produce one (keeps the Substack card preview
+            # non-empty on the publication homepage).
+            subtitle = (piece.topic or "").strip()
+            cover = piece.images[0].url if piece.images else None
+            url = substack_publish_post(
+                title=piece.title or piece.topic or "(untitled)",
+                subtitle=subtitle,
+                body=piece.body,
+                cover_image_url=cover,
+            )
+            log.info(f"  -> substack post live: {url}")
+        piece.publer_job_ids["substack"] = "POSTED"
+        piece.publer_job_ids["substack_url"] = url
+    except SubstackAuthError as e:
+        # Auth-expired path is the one most likely to fire in production —
+        # spell out the recovery action in the email-visible field so the
+        # user knows exactly what to do without digging through logs.
+        msg = f"FAILED: substack.sid expired — re-grab cookie from browser ({e})"
+        log.error(f"  !! substack: {msg}")
+        piece.publer_job_ids["substack"] = msg
+        piece.publer_job_ids["substack_url"] = msg
+    except SubstackError as e:
+        msg = f"FAILED: {e}"
+        log.error(f"  !! substack: {msg}")
+        piece.publer_job_ids["substack"] = msg
+        piece.publer_job_ids["substack_url"] = msg
+    except Exception as e:
+        msg = f"FAILED: {e}"
+        log.error(f"  !! substack unexpected: {msg}")
+        piece.publer_job_ids["substack"] = msg
+        piece.publer_job_ids["substack_url"] = msg
+
+
 def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
     """
     Push piece to Publer for every target platform that has a configured account id.
@@ -2001,6 +2081,12 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
 
     def _schedule_one(platform: str) -> tuple[str, str]:
         """Returns (platform, job_id_or_FAILED_marker). Never raises."""
+        if platform == "substack":
+            # Handled after the Publer fan-out in _publish_substack — this
+            # leg doesn't touch Publer at all. Return empty so the watcher
+            # ignores the "scheduled" slot until the inline handler writes
+            # the resolved URL directly into publer_job_ids["substack_url"].
+            return platform, ""
         account = PUBLER_ACCOUNTS.get(platform)
         if not account:
             log.warning(f"no PUBLER_{platform.upper()}_ID configured -- skipping {platform}")
@@ -2046,6 +2132,13 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
             platform, jid = fut.result()
             if jid:
                 piece.publer_job_ids[platform] = jid
+
+    # Substack fan-out leg. Inline (no watcher) — Substack publishes
+    # synchronously and returns the live URL, so we write it straight into
+    # publer_job_ids["substack_url"]. publish_watcher recognises the pre-
+    # resolved http(s) URL on its next pass and skips Publer polling for
+    # substack, so email/notion/ledger pick it up for free.
+    _publish_substack(piece)
 
     piece.posted_at = datetime.now(timezone.utc)
 
