@@ -127,8 +127,14 @@ terminal:
   # pipeline_test.py via execute_code and needs Tavily live — without the
   # allowlist, _tavily_cross_sources() silently returns [] and the writer
   # loses cross-outlet grounding. MARKETAUX_API_KEY is not in the blocklist.
+  # SUBSTACK_SID + SUBSTACK_PUBLICATION_URL are stripped the same way; without
+  # the allowlist _publish_substack() reads empty strings and silently skips,
+  # so substack shows up as 'skipped' in the watcher and the run finalises
+  # 'posted' without ever hitting Substack.
   env_passthrough:
     - TAVILY_API_KEY
+    - SUBSTACK_SID
+    - SUBSTACK_PUBLICATION_URL
 
 memory:
   memory_enabled: true
