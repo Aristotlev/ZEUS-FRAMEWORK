@@ -1221,9 +1221,9 @@ def generate_article_text(
     """
     target_chars = {
         # ARTICLE = breaking-news fan-out: 3-4 punchy lines max, no setup.
-        # Lead with the take, not the recap. Truncation on IG/LI is fine —
-        # the body fits Twitter Premium (480c) and reads cleanly on FB/IG.
-        ContentType.ARTICLE: "120-220",
+        # Lead with the take, not the recap. Body fits Twitter Premium (480c)
+        # as a single tweet — line-broken so it reads as 3-4 catchy beats.
+        ContentType.ARTICLE: "320-420",
         ContentType.LONG_ARTICLE: "550-900",
         # Carousel body MUST be <450 chars total — visuals do the heavy lifting.
         ContentType.CAROUSEL: "300-440",
@@ -1260,13 +1260,18 @@ def generate_article_text(
 
     if content_type == ContentType.ARTICLE:
         body_clause = (
-            f"Body = {target_chars} characters — 3-4 tight lines max. "
+            f"Body = {target_chars} characters total, written as EXACTLY 3-4 "
+            f"separate lines, ONE newline between each line (no blank lines). "
+            f"Each line is a complete, punchy sentence — no run-on paragraphs. "
             f"Lead with the take, no setup. No 'read more' padding. "
             f"Do NOT write 'Flash News:' yourself — that prefix is added "
-            f"deterministically before publish. Use 2-4 relevant emojis to "
-            f"punch up the key beats (e.g. 🚨 for breaking, 📈 up moves, "
-            f"📉 down, 💰 deals, ⚠️ risk, 🛢️ oil, 🪙 crypto). "
-            f"No emoji spam, no decorative strings."
+            f"deterministically before publish. Use 2-4 relevant emojis spread "
+            f"across the lines (e.g. 🚨 breaking, 📈 up, 📉 down, 💰 deals, "
+            f"⚠️ risk, 🛢️ oil, 🪙 crypto). One emoji per line max, no clusters. "
+            f"Example shape:\n"
+            f"Line 1: hook with the headline number/move 📈\n"
+            f"Line 2: why it matters / who wins-loses 💰\n"
+            f"Line 3: second-order effect / what to watch ⚠️"
         )
     else:
         body_clause = (
@@ -1298,10 +1303,11 @@ def generate_article_text(
             f"Cite outlets by name only (e.g. 'Bloomberg reports...'). The post is "
             f"our own analysis — we don't link to the source.\n"
         )
-        # ARTICLE is short-form (target 120-220c) — give it ~120 tokens so the
-        # model can't drift into 5-paragraph essays even when the prompt clause
-        # is ignored. Other types keep the wider budget.
-        max_tokens = 120 if content_type == ContentType.ARTICLE else 1100
+        # ARTICLE is short-form (target 320-420c, 3-4 lines). 220 tokens
+        # (~880c headroom) is enough for the model to finish 4 sentences cleanly
+        # without trailing off mid-thought — _format_article_body still clamps
+        # if it overshoots.
+        max_tokens = 220 if content_type == ContentType.ARTICLE else 1100
     else:
         # Fallback: no grounding available (fetch failed / manual --topic without
         # URL). Keep the legacy behaviour so the slot still ships rather than
@@ -1326,33 +1332,48 @@ def generate_article_text(
     title = lines[0].lstrip("#").strip()
     body = "\n\n".join(lines[1:]) if len(lines) > 1 else raw
     if content_type == ContentType.ARTICLE:
-        body = _format_article_body(body, max_chars=220)
+        body = _format_article_body(body, max_chars=440)
     return title, body, cost, source
 
 
 _FLASH_NEWS_PREFIX = "Flash News: "
+_SENTENCE_SPLIT_RX = re.compile(r"(?<=[.!?…])\s+(?=[A-Z0-9🚨📈📉💰⚠🛢🪙🔥💥💸🟢🔴⚡])")
 
 
-def _format_article_body(body: str, max_chars: int = 220) -> str:
-    # Soft prompt rules ("3-4 tight lines", "lead with Flash News:") were being
-    # ignored by the writer LLM — breaking-news posts kept landing at 400-600c
-    # without the brand prefix. Enforce both deterministically: strip a duplicate
-    # prefix if the model added one, hard-cut at the last word boundary, then
-    # prepend so every ARTICLE fan-out is stamped consistently.
+def _format_article_body(body: str, max_chars: int = 440) -> str:
+    # The writer LLM ignores soft "3-4 tight lines" prompt rules — it returns a
+    # dense single paragraph. We deterministically reshape into 3-4 line-broken
+    # sentences so the post renders as catchy beats on every platform, drop a
+    # duplicate "Flash News:" lead if the model added one, then prepend ours.
     if not body:
         return _FLASH_NEWS_PREFIX.rstrip()
     core = body.lstrip()
-    # Drop any LLM-added "Flash News:" / "FLASH NEWS:" lead so we don't double-stamp.
     low = core.lower()
     if low.startswith("flash news:"):
         core = core[len("flash news:"):].lstrip(" -—:")
+
+    # Reshape into lines. Honor existing newlines if the LLM cooperated,
+    # otherwise split on sentence boundaries.
+    raw_lines = [l.strip() for l in core.splitlines() if l.strip()]
+    if len(raw_lines) < 2:
+        raw_lines = [s.strip() for s in _SENTENCE_SPLIT_RX.split(core) if s.strip()]
+    # Cap at 4 lines.
+    raw_lines = raw_lines[:4]
+
     body_budget = max_chars - len(_FLASH_NEWS_PREFIX)
-    if len(core) > body_budget:
-        cut = core.rfind(" ", 0, body_budget - 1)
+    # Drop trailing lines until we fit budget — never truncate mid-sentence.
+    while raw_lines and len("\n".join(raw_lines)) > body_budget:
+        raw_lines.pop()
+    # If a single very-long sentence still overflows, word-cut as last resort.
+    if raw_lines and len("\n".join(raw_lines)) > body_budget:
+        only = raw_lines[0]
+        cut = only.rfind(" ", 0, body_budget - 1)
         if cut < body_budget // 2:
             cut = body_budget - 1
-        core = core[:cut].rstrip(" ,;:.\n") + "…"
-    return _FLASH_NEWS_PREFIX + core
+        raw_lines = [only[:cut].rstrip(" ,;:.\n") + "…"]
+    if not raw_lines:
+        return _FLASH_NEWS_PREFIX.rstrip()
+    return _FLASH_NEWS_PREFIX + "\n".join(raw_lines)
 
 
 _URL_RX = re.compile(r"https?://\S+", re.IGNORECASE)

@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Optional
 
 import requests
@@ -247,14 +248,21 @@ def publish_note(body: str) -> str:
     if not text:
         raise SubstackError("publish_note called with empty body")
 
+    # Split on \n\n OR \n so 3-4 line ARTICLE bodies render as separate
+    # paragraphs in the Substack feed — a single text node would collapse the
+    # line breaks and the note would read as one dense run-on.
+    paragraphs = [p.strip() for p in re.split(r"\n+", text) if p.strip()]
+    if not paragraphs:
+        paragraphs = [text]
     payload = {
         "bodyJson": {
             "type": "doc",
             "content": [
                 {
                     "type": "paragraph",
-                    "content": [{"type": "text", "text": text}],
+                    "content": [{"type": "text", "text": p}],
                 }
+                for p in paragraphs
             ],
         },
         "tabId": "for-you",
