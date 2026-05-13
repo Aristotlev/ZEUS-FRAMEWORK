@@ -48,7 +48,8 @@ QUIVER_REPORT_AGE_DAYS = 2
 
 DEDUP_WINDOW_HOURS = 48
 ITEM_MAX_AGE_MINUTES = 90
-SCORE_THRESHOLD = 0.7
+SCORE_THRESHOLD = 0.85
+MAX_SHIPS_PER_FIRE = 1
 FETCH_TIMEOUT = 15
 # Investing.com 403s anything that doesn't look like a real browser.
 USER_AGENT = (
@@ -338,9 +339,15 @@ def run_once(
     *,
     threshold: float = SCORE_THRESHOLD,
     max_age_minutes: int = ITEM_MAX_AGE_MINUTES,
+    max_ships: int = MAX_SHIPS_PER_FIRE,
     dry_run: bool = False,
 ) -> dict:
-    """Single watcher pass. Returns a summary dict (JSON-serializable)."""
+    """Single watcher pass. Returns a summary dict (JSON-serializable).
+
+    Per-fire flow: score every fresh+unseen item, mark all sub-threshold and
+    losers as seen so they don't re-score next pass, then ship at most
+    `max_ships` highest-scoring winners through the ARTICLE pipeline.
+    """
     # Lazy import to avoid pulling all of pipeline_test on module import.
     _ensure_pipeline_on_path()
     from pipeline_test import openrouter_chat, run as run_pipeline  # type: ignore
@@ -358,9 +365,11 @@ def run_once(
         "score_cost_usd": 0.0,
         "shipped": [],
         "rejected": [],
+        "skipped_over_cap": [],
         "errors": [],
     }
 
+    candidates: list[dict] = []
     for item in items:
         item_id = _item_id(item["source"], item["url"], item["title"])
         if _is_seen(conn, item_id):
@@ -382,11 +391,26 @@ def run_once(
             summary["rejected"].append({"title": item["title"], "score": score, "url": item["url"]})
             continue
 
+        candidates.append({**item, "item_id": item_id, "score": score})
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    winners = candidates[:max_ships]
+    losers = candidates[max_ships:]
+
+    for loser in losers:
+        _mark_seen(
+            conn, loser["item_id"], loser["source"], loser["title"], loser["url"], loser["score"], False
+        )
+        summary["skipped_over_cap"].append(
+            {"title": loser["title"], "score": loser["score"], "url": loser["url"]}
+        )
+
+    for item in winners:
         if dry_run:
             log.info("[DRY] would ship: %s", item["title"])
-            _mark_seen(conn, item_id, item["source"], item["title"], item["url"], score, False)
+            _mark_seen(conn, item["item_id"], item["source"], item["title"], item["url"], item["score"], False)
             summary["shipped"].append(
-                {"title": item["title"], "score": score, "url": item["url"], "dry": True}
+                {"title": item["title"], "score": item["score"], "url": item["url"], "dry": True}
             )
             continue
 
@@ -406,16 +430,16 @@ def run_once(
                 source_niche="finance",
             )
             run_id = getattr(piece, "run_id", "")
-            _mark_seen(conn, item_id, item["source"], item["title"], item["url"], score, True)
+            _mark_seen(conn, item["item_id"], item["source"], item["title"], item["url"], item["score"], True)
             summary["shipped"].append(
-                {"title": item["title"], "score": score, "url": item["url"], "run_id": run_id}
+                {"title": item["title"], "score": item["score"], "url": item["url"], "run_id": run_id}
             )
             log.info("shipped run_id=%s: %s", run_id, item["title"])
         except Exception as exc:
             # Don't mark seen — let it retry on the next pass.
             log.exception("ARTICLE pipeline failed for: %s", item["title"])
             summary["errors"].append(
-                {"title": item["title"], "score": score, "url": item["url"], "error": str(exc)}
+                {"title": item["title"], "score": item["score"], "url": item["url"], "error": str(exc)}
             )
 
     conn.close()

@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lib.breaking_news_watcher import (  # noqa: E402
     ITEM_MAX_AGE_MINUTES,
+    MAX_SHIPS_PER_FIRE,
     SCORE_THRESHOLD,
     run_once,
 )
@@ -25,6 +26,12 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--threshold", type=float, default=SCORE_THRESHOLD)
     p.add_argument("--max-age-minutes", type=int, default=ITEM_MAX_AGE_MINUTES)
+    p.add_argument(
+        "--max-ships",
+        type=int,
+        default=MAX_SHIPS_PER_FIRE,
+        help="Max ARTICLE pipelines to fire per pass (highest-scoring win).",
+    )
     p.add_argument("--dry-run", action="store_true", help="score but do not ship")
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
@@ -37,6 +44,7 @@ def main() -> int:
     summary = run_once(
         threshold=args.threshold,
         max_age_minutes=args.max_age_minutes,
+        max_ships=args.max_ships,
         dry_run=args.dry_run,
     )
     print(json.dumps(summary, default=str))
