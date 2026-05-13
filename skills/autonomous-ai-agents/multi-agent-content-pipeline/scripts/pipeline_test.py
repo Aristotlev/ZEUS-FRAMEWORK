@@ -1330,9 +1330,18 @@ def generate_article_text(
 
     raw, cost, source = openrouter_chat(prompt, max_tokens=max_tokens)
     lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+    if not lines:
+        raise RuntimeError(
+            f"writer returned no usable content for topic={topic!r} "
+            f"(raw={raw!r}); refusing to ship empty post"
+        )
     title = lines[0].lstrip("#").strip()
     body = "\n\n".join(lines[1:]) if len(lines) > 1 else raw
     if content_type == ContentType.ARTICLE:
+        # URL-strip BEFORE prefixing so a URL-only body can't collapse to
+        # just "Flash News:" downstream (Substack was shipping the bare
+        # prefix when grounding context leaked URLs into the body).
+        body = _strip_urls_from_body(body)
         body = _format_article_body(body, max_chars=270)
     return title, body, cost, source
 
@@ -1346,8 +1355,12 @@ def _format_article_body(body: str, max_chars: int = 270) -> str:
     # dense single paragraph. We deterministically reshape into 3-4 line-broken
     # sentences so the post renders as catchy beats on every platform, drop a
     # duplicate "Flash News:" lead if the model added one, then prepend ours.
-    if not body:
-        return _FLASH_NEWS_PREFIX.rstrip()
+    #
+    # Empty/degenerate bodies raise instead of returning a bare "Flash News:"
+    # prefix — we'd rather fail the run loudly than have Substack ship an
+    # empty-looking note (regression seen 2026-05-13).
+    if not body or not body.strip():
+        raise RuntimeError("empty article body — refusing to ship 'Flash News:' alone")
     core = body.lstrip()
     low = core.lower()
     if low.startswith("flash news:"):
@@ -1373,7 +1386,10 @@ def _format_article_body(body: str, max_chars: int = 270) -> str:
             cut = body_budget - 1
         raw_lines = [only[:cut].rstrip(" ,;:.\n") + "…"]
     if not raw_lines:
-        return _FLASH_NEWS_PREFIX.rstrip()
+        raise RuntimeError(
+            "article body collapsed to nothing after reshape — refusing to ship "
+            "'Flash News:' alone (original body: %r)" % body[:200]
+        )
     return _FLASH_NEWS_PREFIX + "\n".join(raw_lines)
 
 
@@ -2316,6 +2332,20 @@ def _publish_substack(piece: ContentPiece) -> None:
 
     try:
         if piece.content_type == ContentType.ARTICLE:
+            # Belt-and-braces: never ship a Substack note that is just the
+            # "Flash News:" prefix (or any 'Flash News:' with no real body
+            # after it). Earlier paths should already raise on empty bodies
+            # — this is the last gate before the wire.
+            _body = (piece.body or "").strip()
+            _after_prefix = _body
+            if _after_prefix.lower().startswith("flash news:"):
+                _after_prefix = _after_prefix[len("flash news:"):].lstrip(" -—:")
+            if not _after_prefix.strip():
+                msg = "FAILED: empty body after 'Flash News:' prefix — not posting"
+                log.error(f"  !! substack: {msg} (piece.body={piece.body!r})")
+                piece.publer_job_ids["substack"] = msg
+                piece.publer_job_ids["substack_url"] = msg
+                return
             url = substack_publish_note(piece.body)
             log.info(f"  -> substack note live: {url}")
         else:

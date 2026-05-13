@@ -12,16 +12,18 @@ the user's explicit ask.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import logging
 import os
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 from xml.etree import ElementTree as ET
 
 import requests
@@ -29,6 +31,42 @@ import requests
 log = logging.getLogger(__name__)
 
 DB_PATH = Path.home() / ".hermes" / "breaking_news_seen.db"
+LOCK_PATH = Path.home() / ".hermes" / "breaking_news_watcher.lock"
+
+
+@contextmanager
+def _exclusive_lock() -> Iterator[bool]:
+    """Process-level lock so overlapping cron fires can't both ship.
+
+    Cron runs the watcher every 10 min, but a pass that ships an ARTICLE can
+    take 30-90s (RSS+score+pipeline+Publer+Substack). Without a lock, a slow
+    pass + the next cron tick could race on the same SQLite rows and
+    double-ship the same headline. Non-blocking: if the lock is held we
+    yield False and let run_once short-circuit cleanly.
+    """
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(LOCK_PATH, "w")
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            fh.write(str(os.getpid()))
+            fh.flush()
+        except Exception:
+            pass
+        yield True
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+    finally:
+        try:
+            fh.close()
+        except Exception:
+            pass
 
 RSS_FEEDS: list[str] = [
     "http://feeds.marketwatch.com/marketwatch/topstories/",
@@ -373,9 +411,6 @@ def run_once(
     from pipeline_test import openrouter_chat, run as run_pipeline  # type: ignore
     from lib.content_types import ContentType  # type: ignore
 
-    conn = _conn()
-    _prune_old(conn)
-
     summary: dict = {
         "fetched": 0,
         "new": 0,
@@ -388,7 +423,45 @@ def run_once(
         "skipped_rate_cap": [],
         "errors": [],
         "rate_cap_tripped": None,
+        "skipped_locked": False,
     }
+
+    with _exclusive_lock() as acquired:
+        if not acquired:
+            log.warning(
+                "another breaking-news watcher pass is in flight — skipping this fire"
+            )
+            summary["skipped_locked"] = True
+            return summary
+        return _run_locked(
+            summary=summary,
+            threshold=threshold,
+            max_age_minutes=max_age_minutes,
+            max_ships=max_ships,
+            hard_cap_per_hour=hard_cap_per_hour,
+            hard_cap_per_day=hard_cap_per_day,
+            dry_run=dry_run,
+            openrouter_chat=openrouter_chat,
+            run_pipeline=run_pipeline,
+            ContentType=ContentType,
+        )
+
+
+def _run_locked(
+    *,
+    summary: dict,
+    threshold: float,
+    max_age_minutes: int,
+    max_ships: int,
+    hard_cap_per_hour: int,
+    hard_cap_per_day: int,
+    dry_run: bool,
+    openrouter_chat,
+    run_pipeline,
+    ContentType,
+) -> dict:
+    conn = _conn()
+    _prune_old(conn)
 
     shipped_last_hour = _shipped_count_since(conn, 3600)
     shipped_last_day = _shipped_count_since(conn, 86400)
