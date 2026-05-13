@@ -74,7 +74,8 @@ def _cookie() -> str:
 def _headers() -> dict:
     # Substack's anti-bot layer expects a real browser UA + an Origin matching
     # the publication. Without these, /api/v1/drafts intermittently returns 403
-    # even with a valid session cookie.
+    # even with a valid session cookie. /api/v1/comment/feed (Notes) additionally
+    # requires X-Requested-With — without it the WAF 403s even with a valid SID.
     pub = _publication_url()
     return {
         "Accept": "application/json",
@@ -86,6 +87,7 @@ def _headers() -> dict:
         ),
         "Origin": pub,
         "Referer": f"{pub}/publish/home",
+        "X-Requested-With": "XMLHttpRequest",
     }
 
 
