@@ -2025,18 +2025,23 @@ def _publer_verify_post_created(account_id: str, text_snippet: str, job_id: str,
 def _publer_schedule(provider: str, account_id: str, post_type: str, text: str, media_ids: list[str]) -> str:
     # Publer interprets timezone-less ISO timestamps as UTC. Use UTC explicitly.
     when = (datetime.now(timezone.utc) + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
+    network: dict = {
+        "type": post_type,
+        "text": text,
+        "media": [{"id": mid} for mid in media_ids],
+    }
+    # X long-form: per Publer docs, bodies >280c on Twitter need
+    # details.type="long_post" or Publer silently posts the full text but
+    # X truncates to 280c on the wire. Requires X Premium on the connected
+    # account (we have it). No effect on other platforms.
+    if provider == "twitter" and len(text) > 280:
+        network["details"] = {"type": "long_post"}
     payload = {
         "bulk": {
             "state": "scheduled",
             "posts": [
                 {
-                    "networks": {
-                        provider: {
-                            "type": post_type,
-                            "text": text,
-                            "media": [{"id": mid} for mid in media_ids],
-                        }
-                    },
+                    "networks": {provider: network},
                     "accounts": [{"id": account_id, "scheduled_at": when}],
                 }
             ],
