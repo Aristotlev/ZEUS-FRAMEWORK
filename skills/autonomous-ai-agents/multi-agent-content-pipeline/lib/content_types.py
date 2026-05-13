@@ -58,7 +58,10 @@ PLATFORMS_BY_TYPE: dict[ContentType, list[str]] = {
     # Substack Post) via lib/substack.py. If SUBSTACK_CONNECT_SID is unset
     # the inline handler skips with the same "not configured" semantics
     # Publer platforms use, so the run still finalises cleanly.
-    ContentType.ARTICLE: ["twitter", "instagram", "linkedin", "facebook", "substack"],
+    # ARTICLE (short-form) drops instagram: it's text-only, IG needs a media
+    # attachment, so the slot always fails. LONG_ARTICLE keeps IG because it
+    # ships with a cover image. Removed from ARTICLE only on 2026-05-13.
+    ContentType.ARTICLE: ["twitter", "linkedin", "facebook", "substack"],
     ContentType.LONG_ARTICLE: ["twitter", "instagram", "linkedin", "facebook", "substack"],
     # reddit is wired here for FUTURE Publer integration. If PUBLER_REDDIT_ID
     # is unset, `_schedule_one` skips it with a "no PUBLER_*_ID configured"
