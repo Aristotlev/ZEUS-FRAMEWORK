@@ -6,13 +6,13 @@ rewrites. On Twitter, bodies longer than the per-tweet limit are mechanically
 chunked into a text thread via split_thread; multi-image carousel posts on
 Twitter never thread — they ship as a single native gallery.
 
-Twitter tier (2026-05-06): account is on the FREE plan, so per-tweet hard limit
-is 280. Knobs below are env-overridable so we can flip to Premium later without
-a code change:
-  ZEUS_TWITTER_TIER=premium   (preset: limit=480, trigger=480, budget=470)
+Twitter tier knobs (env-overridable so we can flip without a code change):
+  ZEUS_TWITTER_TIER=premium   (preset: limit=25000, trigger=25000, budget=24990
+                               — uses Premium long-post cap so LONG_ARTICLE
+                               ships as a single long-form tweet, not a thread)
   ZEUS_TWITTER_TIER=free      (preset, default: limit=280, trigger=280, budget=270)
   ZEUS_TWITTER_LIMIT / ZEUS_TWITTER_THREAD_TRIGGER / ZEUS_TWITTER_TWEET_BUDGET
-    override individual values; useful when X changes the cap (e.g. Premium+).
+    override individual values; useful for ad-hoc tuning.
 
 Budget reserves room for the " i/N" suffix (≤6 chars for N<100, ≤8 for N<1000),
 so every chunk + suffix lands safely under the per-tweet limit.
@@ -26,7 +26,10 @@ _TIER = os.getenv("ZEUS_TWITTER_TIER", "free").strip().lower()
 _TIER_PRESETS: dict[str, tuple[int, int, int]] = {
     # tier: (per-tweet limit, thread trigger, per-chunk budget)
     "free": (280, 280, 270),
-    "premium": (480, 480, 470),
+    # Premium long-post cap (25k chars). Trigger == limit so LONG_ARTICLE
+    # (~550-900c), CAROUSEL captions, SHORT_VIDEO copy etc. all ship as a
+    # single tweet — no threading on Premium.
+    "premium": (25000, 25000, 24990),
 }
 _preset_limit, _preset_trigger, _preset_budget = _TIER_PRESETS.get(
     _TIER, _TIER_PRESETS["free"],
