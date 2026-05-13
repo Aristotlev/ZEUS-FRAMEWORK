@@ -35,6 +35,12 @@ if [ "$(id -u)" = "0" ]; then
     if [ -d "$HERMES_HOME/cron" ]; then
         chown -R hermes:hermes "$HERMES_HOME/cron" 2>/dev/null || true
     fi
+    # Same usermod-after-build issue for /opt/hermes: the venv is built as
+    # uid 10000 in the image but HERMES_UID=1000 at runtime, so uv pip
+    # installs (e.g. soft-dep pypdf below) fail with EACCES on every boot.
+    if [ "$(stat -c %u "$HERMES_INSTALL" 2>/dev/null)" != "$actual_uid" ]; then
+        chown -R hermes:hermes "$HERMES_INSTALL" 2>/dev/null || true
+    fi
     exec gosu hermes "$0" "$@"
 fi
 
