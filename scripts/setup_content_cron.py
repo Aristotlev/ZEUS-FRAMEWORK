@@ -202,6 +202,24 @@ def _build_jobs(niche: List[str]):
         + HARD_RULES
     )
 
+    breaking_news = (
+        "Run ONE breaking-news watcher pass. The script polls MarketWatch, "
+        "Investing.com, InvestingLive RSS + Finnhub general news, dedups "
+        "against ~/.hermes/breaking_news_seen.db (48h window), scores fresh "
+        "headlines (one OpenRouter call each), and AUTO-PUBLISHES anything "
+        "scoring >= 0.7 via the ARTICLE pipeline (short-form text-only -> "
+        "Publer fan-out + Substack Note). The script's own run() call into "
+        "pipeline_test.py owns Notion archive, cost ledger, and email rollup "
+        "for each shipped item.\n\n"
+        f"COMMAND (this is the entire task):\n"
+        f"  {PYTHON} {PIPELINE}/breaking_news_watch.py\n\n"
+        "On exit 0: report the one-line JSON summary printed to stdout. If "
+        "summary['shipped'] is non-empty, the ARTICLE pipeline already fired "
+        "for each item and the unified email rollup will arrive from "
+        "pipeline_test.py's email_notify path. Do NOT send your own emails."
+        + HARD_RULES
+    )
+
     publish_ready = (
         "Drip-feed one piece per fire from the 'Ready to Publish' Notion "
         "queue (FIFO by created_time, capped at 72h freshness). The script "
@@ -301,6 +319,19 @@ def _build_jobs(niche: List[str]):
             # planning window.
             "schedule": "0 17 * * 0",
             "prompt": weekly_analytics,
+        },
+        {
+            "name": "zeus-content-breaking-news",
+            # Every 10 min. Polls 3 RSS feeds + Finnhub general news, scores
+            # fresh headlines, auto-publishes ARTICLE for anything >= 0.7.
+            # Dedup window (48h) lives in SQLite at ~/.hermes/breaking_news_seen.db
+            # so the same headline doesn't re-ship when feeds overlap or
+            # syndicate from each other. Cheap per fire: 3-5 HTTP gets + a
+            # handful of openrouter_chat calls. Real cost is the ARTICLE
+            # pipeline that fires when scorer says yes — uncapped, so the
+            # threshold is the only gate.
+            "schedule": "*/10 * * * *",
+            "prompt": breaking_news,
         },
     ]
 
