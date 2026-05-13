@@ -21,7 +21,7 @@ WATCHER="$SCRIPT_DIR/publish_watcher.py"
 PYTHON="${ZEUS_PYTHON:-/opt/hermes/.venv/bin/python}"
 PID_FILE="$HERMES_HOME/.hermes/zeus_watcher_daemon.pid"
 LOG_FILE="$HERMES_HOME/.hermes/zeus_watcher_daemon.log"
-INTERVAL="${ZEUS_WATCHER_INTERVAL:-30}"
+INTERVAL="${ZEUS_WATCHER_INTERVAL:-120}"
 
 mkdir -p "$(dirname "$PID_FILE")"
 

@@ -2008,6 +2008,35 @@ def _publer_headers(json_body: bool = True) -> dict:
     return h
 
 
+# Process-wide Publer 429 cooldown (mirror of the watcher's). The schedule
+# path + verify GETs share rate-limit budget with the watcher daemon; once
+# 429'd, every helper short-circuits until cooldown lapses. Honors
+# `Retry-After`; default 90s. Without this the verify loop hammered Publer
+# 10× per scheduled post, compounding the rate-limit window.
+_PUBLER_BACKOFF_UNTIL: float = 0.0
+_PUBLER_DEFAULT_BACKOFF_S: float = 90.0
+
+
+def _publer_rate_limited() -> bool:
+    return time.monotonic() < _PUBLER_BACKOFF_UNTIL
+
+
+def _publer_note_429(resp=None) -> None:
+    global _PUBLER_BACKOFF_UNTIL
+    wait = _PUBLER_DEFAULT_BACKOFF_S
+    if resp is not None:
+        ra = resp.headers.get("Retry-After")
+        if ra:
+            try:
+                wait = max(wait, float(ra))
+            except (TypeError, ValueError):
+                pass
+    target = time.monotonic() + wait
+    if target > _PUBLER_BACKOFF_UNTIL:
+        _PUBLER_BACKOFF_UNTIL = target
+        log.warning(f"Publer rate-limited (HTTP 429) — pausing Publer GETs for {wait:.0f}s")
+
+
 def _publer_upload(local_path: str, mime: str) -> str:
     with open(local_path, "rb") as fh:
         r = requests.post(
@@ -2026,47 +2055,38 @@ def _publer_verify_post_created(account_id: str, text_snippet: str, job_id: str,
     # job_id and /job_status later reports "complete" even when no Post object
     # was ever created (observed 2026-05-10 18:34 UTC during a Publer-side
     # rate-limit window — 4 platforms stuck pending forever, watcher snippet-
-    # matching against a post that didn't exist). Raise if the post hasn't
-    # materialized; the caller (_schedule_one) converts that to FAILED: so
-    # the watcher finalises the row instead of looping.
+    # matching against a post that didn't exist).
     #
-    # 2026-05-13: if EVERY lookup attempt hits a 429 (we burned the
-    # rate-limit budget on diagnostics), don't false-positive a phantom.
-    # The schedule POST already returned 200 with a job_id — the post is
-    # almost certainly there, we just can't read it. Trust the schedule.
+    # 2026-05-13 (v2): single-shot GET, no retry loop. The original 10×3s
+    # poll was the largest Publer GET consumer per schedule (each
+    # breaking-news cron run scheduled 3+ posts × 10 GETs each = 30+ wasted
+    # GETs that pushed us into the 429 cliff). One shot is enough: Publer
+    # returns the post object on /job_status as soon as it's queued. If the
+    # answer is "not yet" or 429, trust the schedule POST's 200 + job_id —
+    # the watcher's persistent post_id resolution will catch silent drops
+    # later. The phantom-row failure mode is rare; the rate-limit damage
+    # was constant.
     if not job_id or job_id.startswith("FAILED"):
         return
-    deadline = time.monotonic() + timeout_s
-    saw_non_429 = False
-    while time.monotonic() < deadline:
-        try:
-            r = requests.get(f"{PUBLER_BASE}/job_status/{job_id}", headers=_publer_headers(), timeout=15)
-            if r.status_code == 429:
-                pass  # rate-limited; keep retrying but don't count this as a "no" answer
-            else:
-                saw_non_429 = True
-                if r.status_code == 200:
-                    data = r.json()
-                    posts = data.get("posts") or (data.get("payload") or {}).get("posts") or []
-                    for p in posts:
-                        if p.get("id") or p.get("post_id"):
-                            return
-                if _publer_find_post_id(account_id, text_snippet):
+    if _publer_rate_limited():
+        return  # trust the schedule; watcher will reconcile
+    try:
+        r = requests.get(f"{PUBLER_BASE}/job_status/{job_id}", headers=_publer_headers(), timeout=15)
+        if r.status_code == 429:
+            _publer_note_429(r)
+            return
+        if r.status_code == 200:
+            data = r.json()
+            posts = data.get("posts") or (data.get("payload") or {}).get("posts") or []
+            for p in posts:
+                if p.get("id") or p.get("post_id"):
                     return
-        except Exception as e:
-            log.warning(f"_publer_verify_post_created lookup error: {e}")
-        time.sleep(3)
-    if not saw_non_429:
-        log.warning(
-            f"Publer schedule job_id={job_id} accepted (200) but verify GET was "
-            f"rate-limited for {timeout_s}s — trusting the schedule, not raising."
-        )
-        return
-    raise RuntimeError(
-        f"Publer accepted schedule job_id={job_id} but no Post object appeared "
-        f"in /posts within {timeout_s}s — silent drop. "
-        f"Refusing to enqueue a phantom row."
-    )
+    except Exception as e:
+        log.warning(f"_publer_verify_post_created lookup error: {e}")
+    # No post visible yet on first GET. Don't poll — trust the schedule
+    # and let the watcher reconcile. Silent-drop detection migrates to the
+    # watcher's deadline path (12 min default), which already handles it.
+    return
 
 
 def _publer_schedule(provider: str, account_id: str, post_type: str, text: str, media_ids: list[str]) -> str:
@@ -2162,8 +2182,13 @@ def _publer_post_id_from_job(job_id: str) -> str | None:
     """
     if not job_id or job_id.startswith("FAILED"):
         return None
+    if _publer_rate_limited():
+        return None
     try:
         r = requests.get(f"{PUBLER_BASE}/job_status/{job_id}", headers=_publer_headers(), timeout=15)
+        if r.status_code == 429:
+            _publer_note_429(r)
+            return None
         if r.status_code != 200:
             return None
         data = r.json()
@@ -2183,8 +2208,13 @@ def _publer_find_post_id(account_id: str, text_snippet: str) -> str | None:
         # Normalize whitespace + case so Publer's text mangling (smart quotes,
         # tracking-param re-encoding, leading emoji) doesn't break the match.
         return " ".join((s or "").lower().split())
+    if _publer_rate_limited():
+        return None
     try:
         r = requests.get(f"{PUBLER_BASE}/posts?limit=30", headers=_publer_headers(), timeout=15)
+        if r.status_code == 429:
+            _publer_note_429(r)
+            return None
         if r.status_code != 200:
             log.warning(f"Publer GET /posts returned {r.status_code}: {r.text[:200]}")
             return None
@@ -2208,8 +2238,13 @@ def _publer_find_post_id(account_id: str, text_snippet: str) -> str | None:
 
 
 def _publer_get_post(post_id: str) -> dict | None:
+    if _publer_rate_limited():
+        return None
     try:
         r = requests.get(f"{PUBLER_BASE}/posts/{post_id}", headers=_publer_headers(), timeout=15)
+        if r.status_code == 429:
+            _publer_note_429(r)
+            return None
         if r.status_code == 200:
             return r.json().get("post") or r.json()
         # some Publer instances return the post directly without wrapping

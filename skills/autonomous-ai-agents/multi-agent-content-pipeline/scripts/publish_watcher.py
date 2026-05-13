@@ -8,7 +8,7 @@ patches Notion, writes the final ledger row, and sends the "posts live" email.
 
 Modes:
     --once     run a single pass over the queue and exit (cron-friendly)
-    --daemon   run forever, polling every --interval seconds (default 30)
+    --daemon   run forever, polling every --interval seconds (default 120)
 
 Cron example (every 2 minutes):
     */2 * * * * cd /path/to/pipeline && /path/to/.venv/bin/python scripts/publish_watcher.py --once
@@ -134,6 +134,40 @@ def _publer_headers() -> dict:
     }
 
 
+# Process-wide Publer 429 cooldown. Watcher + breaking-news cron + verify
+# GETs together saturate Publer's per-workspace rate limit; once we trip
+# 429, every helper short-circuits until the cooldown expires instead of
+# hammering. Honors `Retry-After` when Publer sets it; otherwise 90s.
+# Observed 2026-05-13: 13 ARTICLE rows stuck `pending` for hours because
+# every /job_status + /posts GET 429ed and no log line surfaced.
+_PUBLER_BACKOFF_UNTIL: float = 0.0
+_DEFAULT_BACKOFF_S: float = 90.0
+
+
+def _publer_rate_limited() -> bool:
+    return time.monotonic() < _PUBLER_BACKOFF_UNTIL
+
+
+def _publer_cooldown_remaining() -> float:
+    return max(0.0, _PUBLER_BACKOFF_UNTIL - time.monotonic())
+
+
+def _publer_note_429(resp: requests.Response | None = None) -> None:
+    global _PUBLER_BACKOFF_UNTIL
+    wait = _DEFAULT_BACKOFF_S
+    if resp is not None:
+        ra = resp.headers.get("Retry-After")
+        if ra:
+            try:
+                wait = max(wait, float(ra))
+            except (TypeError, ValueError):
+                pass
+    target = time.monotonic() + wait
+    if target > _PUBLER_BACKOFF_UNTIL:
+        _PUBLER_BACKOFF_UNTIL = target
+        log.warning(f"Publer rate-limited (HTTP 429) — pausing all GETs for {wait:.0f}s")
+
+
 def _norm(s: str) -> str:
     return " ".join((s or "").lower().split())
 
@@ -159,8 +193,13 @@ def _post_id_from_job(job_id: str) -> str | None:
     """
     if not job_id or job_id.startswith("FAILED"):
         return None
+    if _publer_rate_limited():
+        return None
     try:
         r = requests.get(f"{PUBLER_BASE}/job_status/{job_id}", headers=_publer_headers(), timeout=15)
+        if r.status_code == 429:
+            _publer_note_429(r)
+            return None
         if r.status_code != 200:
             return None
         data = r.json()
@@ -185,8 +224,13 @@ def _find_publer_post_id(account_id: str, snippet: str) -> str | None:
     """
     if not snippet:
         return None
+    if _publer_rate_limited():
+        return None
     try:
         r = requests.get(f"{PUBLER_BASE}/posts?limit=30", headers=_publer_headers(), timeout=15)
+        if r.status_code == 429:
+            _publer_note_429(r)
+            return None
         if r.status_code != 200:
             return None
         target = _norm(snippet)[:40]
@@ -203,8 +247,13 @@ def _find_publer_post_id(account_id: str, snippet: str) -> str | None:
 
 
 def _get_post(post_id: str) -> dict | None:
+    if _publer_rate_limited():
+        return None
     try:
         r = requests.get(f"{PUBLER_BASE}/posts/{post_id}", headers=_publer_headers(), timeout=15)
+        if r.status_code == 429:
+            _publer_note_429(r)
+            return None
         if r.status_code != 200:
             return None
         body = r.json()
@@ -263,7 +312,13 @@ def _resolve_one(piece: ContentPiece, post_id_cache: dict) -> dict:
             states[platform] = "failed"
             continue
         cache_key = f"{piece.run_id}:{platform}"
-        post_id = post_id_cache.get(cache_key)
+        # Persisted across passes via piece.publer_job_ids[f"{platform}_post_id"]
+        # so subsequent watcher passes skip the /job_status GET entirely. Before
+        # this, every 30s pass re-resolved every pending platform's post_id from
+        # the schedule job_id — for 13 stuck rows × ~3 platforms = 78 GETs/min
+        # in steady state, which is the main contributor to the Publer 429
+        # cliff seen 2026-05-13. The post_id is stable once Publer assigns it.
+        post_id = post_id_cache.get(cache_key) or piece.publer_job_ids.get(f"{platform}_post_id", "") or ""
         if not post_id:
             # Prefer direct job_id -> post_id resolution. The snippet matcher
             # only runs as a backstop for the (rare) race where job_status
@@ -286,6 +341,7 @@ def _resolve_one(piece: ContentPiece, post_id_cache: dict) -> dict:
                 post_id = _find_publer_post_id(account, snippet)
             if post_id:
                 post_id_cache[cache_key] = post_id
+                piece.publer_job_ids[f"{platform}_post_id"] = post_id
         if not post_id:
             states[platform] = "pending"
             continue
@@ -571,7 +627,7 @@ def main() -> int:
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--once", action="store_true", help="Run one pass and exit (default)")
     g.add_argument("--daemon", action="store_true", help="Loop forever, polling --interval seconds")
-    ap.add_argument("--interval", type=int, default=30, help="Daemon poll interval in seconds (default 30)")
+    ap.add_argument("--interval", type=int, default=120, help="Daemon poll interval in seconds (default 120)")
     args = ap.parse_args()
 
     if not PUBLER_KEY:
@@ -582,6 +638,16 @@ def main() -> int:
         log.info(f"watcher daemon: poll every {args.interval}s")
         try:
             while True:
+                # If a prior pass tripped Publer's 429, sleep through the
+                # cooldown before starting another pass — running a full pass
+                # with every GET short-circuiting just spins the queue and
+                # keeps the rate-limit window open via verify path elsewhere.
+                cooldown = _publer_cooldown_remaining()
+                if cooldown > 0:
+                    sleep_s = max(args.interval, cooldown + 5)
+                    log.info(f"  Publer cooldown active ({cooldown:.0f}s left) — sleeping {sleep_s:.0f}s")
+                    time.sleep(sleep_s)
+                    continue
                 resolved, advanced, pending = _process_pass()
                 log.info(f"  pass: resolved={resolved} advanced={advanced} pending={pending}")
                 time.sleep(args.interval)
