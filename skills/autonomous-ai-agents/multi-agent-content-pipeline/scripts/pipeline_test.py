@@ -1375,11 +1375,14 @@ def _format_article_body(body: str, max_chars: int = 270) -> str:
     raw_lines = raw_lines[:4]
 
     body_budget = max_chars - len(_FLASH_NEWS_PREFIX)
-    # Drop trailing lines until we fit budget — never truncate mid-sentence.
-    while raw_lines and len("\n".join(raw_lines)) > body_budget:
+    # Drop trailing lines until we fit budget, but always keep the lead
+    # sentence — if it alone overflows, the word-cut block below handles it.
+    # Earlier this loop popped the lead too, leaving raw_lines=[] and shipping
+    # a bare "Flash News:" to Substack.
+    while len(raw_lines) > 1 and len("\n".join(raw_lines)) > body_budget:
         raw_lines.pop()
-    # If a single very-long sentence still overflows, word-cut as last resort.
-    if raw_lines and len("\n".join(raw_lines)) > body_budget:
+    # Single very-long lead: word-cut at the last space within budget.
+    if raw_lines and len(raw_lines[0]) > body_budget:
         only = raw_lines[0]
         cut = only.rfind(" ", 0, body_budget - 1)
         if cut < body_budget // 2:
