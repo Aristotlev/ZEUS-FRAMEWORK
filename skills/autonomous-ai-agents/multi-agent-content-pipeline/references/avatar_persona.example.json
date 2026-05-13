@@ -1,0 +1,12 @@
+{
+  "character_lora_url": "https://v3.fal.media/files/<...>/flux-lora.safetensors",
+  "trigger_word": "zeusavatar",
+  "style_prefix": "stylized 3D cartoon character, clean linework, vibrant editorial color palette, finance/tech aesthetic, soft volumetric lighting",
+  "negative_prompt": "text, watermark, logo, signature, captions, distorted face, extra fingers, extra limbs, deformed, blurry, low quality",
+  "environment_lora_url": null,
+  "environment_scale": 0.6,
+  "face_pose_prompt": "front-facing portrait, head and shoulders, looking directly at camera, neutral closed-mouth expression, soft studio lighting, sharp focus on face",
+  "voice_id": "fish-audio-voice-id-here",
+  "notes": "trained on 24 reference images of <character>; trigger token must appear in every prompt or identity drifts",
+  "trained_at": null
+}

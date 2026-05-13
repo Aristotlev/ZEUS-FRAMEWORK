@@ -11,12 +11,22 @@ from .audio_mix import mix_audio_for_video
 from .fal import (
     FalError,
     generate_image,
+    generate_image_flux_lora,
     generate_video_kling,
     generate_video_kling_i2v,
+    generate_video_hedra,
     generate_music,
+    train_flux_lora,
     upload_local_file as fal_upload_local_file,
     download,
     kling_cost,
+)
+from .avatar_persona import (
+    AvatarPersona,
+    AvatarPersonaError,
+    PERSONA_FILE as AVATAR_PERSONA_FILE,
+    load_persona as load_avatar_persona,
+    save_persona as save_avatar_persona,
 )
 from .fish import FishAudioError, synthesize as fish_synthesize
 from .substack import (
@@ -24,6 +34,12 @@ from .substack import (
     SubstackAuthError,
     publish_post as substack_publish_post,
     publish_note as substack_publish_note,
+)
+from .heygen import (
+    HeyGenError,
+    generate_avatar_video as heygen_generate_avatar_video,
+    heygen_cost,
+    download as heygen_download,
 )
 from .notion import NotionArchive, extract_id_from_url
 from .platforms import (
@@ -67,18 +83,30 @@ __all__ = [
     "PLATFORMS_BY_TYPE",
     "FalError",
     "generate_image",
+    "generate_image_flux_lora",
     "generate_video_kling",
     "generate_video_kling_i2v",
+    "generate_video_hedra",
     "fal_upload_local_file",
     "generate_music",
+    "train_flux_lora",
     "download",
     "kling_cost",
+    "AvatarPersona",
+    "AvatarPersonaError",
+    "AVATAR_PERSONA_FILE",
+    "load_avatar_persona",
+    "save_avatar_persona",
     "FishAudioError",
     "fish_synthesize",
     "SubstackError",
     "SubstackAuthError",
     "substack_publish_post",
     "substack_publish_note",
+    "HeyGenError",
+    "heygen_generate_avatar_video",
+    "heygen_cost",
+    "heygen_download",
     "NotionArchive",
     "extract_id_from_url",
     "LIMITS",

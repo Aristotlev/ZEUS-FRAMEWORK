@@ -48,7 +48,7 @@ QUIVER_REPORT_AGE_DAYS = 2
 
 DEDUP_WINDOW_HOURS = 48
 ITEM_MAX_AGE_MINUTES = 90
-SCORE_THRESHOLD = 0.90
+SCORE_THRESHOLD = 0.80
 MAX_SHIPS_PER_FIRE = 1
 # Hard ceilings enforced against the seen.shipped=1 history. Prevents a
 # runaway loop (e.g. duplicate cron, threshold misconfig) from blasting
