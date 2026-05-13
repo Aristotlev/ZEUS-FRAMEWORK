@@ -2097,11 +2097,15 @@ def _publer_schedule(provider: str, account_id: str, post_type: str, text: str, 
         "text": text,
         "media": [{"id": mid} for mid in media_ids],
     }
-    # X long-form: per Publer docs, bodies >280c on Twitter need
-    # details.type="long_post" or Publer silently posts the full text but
-    # X truncates to 280c on the wire. Requires X Premium on the connected
-    # account (we have it). No effect on other platforms.
+    # X long-form: Publer's docs require BOTH a top-level "status" network
+    # type AND details.type="long_post" — sending "photo" with the long_post
+    # detail makes Publer silently strip the detail and post a regular
+    # truncated/threaded tweet (the symptom we just got burned by on
+    # LONG_ARTICLE runs, body=2133c → 4-tweet thread on X). Setting
+    # type="status" lets the long_post flag survive even when media is
+    # attached — X Premium accepts inline media on long-form tweets.
     if provider == "twitter" and len(text) > 280:
+        network["type"] = "status"
         network["details"] = {"type": "long_post"}
     payload = {
         "bulk": {
@@ -2295,7 +2299,7 @@ def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 720, poll_int
             )
             if (
                 platform == "twitter"
-                and piece.content_type != ContentType.ARTICLE
+                and piece.content_type not in (ContentType.ARTICLE, ContentType.LONG_ARTICLE)
                 and needs_thread(piece.body)
                 and media_count <= 1
             ):
@@ -2482,12 +2486,15 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
         # Twitter only: bodies >480 chars become a text thread (mechanical
         # chunking of the same body, not a rewrite). Multi-image carousels
         # always ship as a single native gallery tweet — never thread.
-        # ARTICLE is short-form by mandate — must always be one tweet, even
-        # if length somehow drifts (e.g. env tier misconfig leaves free-tier
-        # 280-char trigger active).
+        # ARTICLE + LONG_ARTICLE are pinned to a single tweet regardless
+        # of env: ARTICLE because it's short-form by mandate, LONG_ARTICLE
+        # because it's the Premium long-post path (details.type=long_post,
+        # set in _publer_schedule). Without this guard, an env regression
+        # that drops ZEUS_TWITTER_TIER back to "free" would silently thread
+        # 2k-char long-articles — exactly the bug we just shipped.
         if (
             platform == "twitter"
-            and piece.content_type != ContentType.ARTICLE
+            and piece.content_type not in (ContentType.ARTICLE, ContentType.LONG_ARTICLE)
             and needs_thread(piece.body)
             and len(platform_media) <= 1
         ):
