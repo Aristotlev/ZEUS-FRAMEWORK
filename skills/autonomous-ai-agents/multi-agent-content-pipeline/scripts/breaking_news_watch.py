@@ -15,6 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lib.breaking_news_watcher import (  # noqa: E402
+    HARD_CAP_PER_DAY,
+    HARD_CAP_PER_HOUR,
     ITEM_MAX_AGE_MINUTES,
     MAX_SHIPS_PER_FIRE,
     SCORE_THRESHOLD,
@@ -32,6 +34,18 @@ def main() -> int:
         default=MAX_SHIPS_PER_FIRE,
         help="Max ARTICLE pipelines to fire per pass (highest-scoring win).",
     )
+    p.add_argument(
+        "--hard-cap-per-hour",
+        type=int,
+        default=HARD_CAP_PER_HOUR,
+        help="Skip pass entirely if >= N items have shipped in the last hour.",
+    )
+    p.add_argument(
+        "--hard-cap-per-day",
+        type=int,
+        default=HARD_CAP_PER_DAY,
+        help="Skip pass entirely if >= N items have shipped in the last 24h.",
+    )
     p.add_argument("--dry-run", action="store_true", help="score but do not ship")
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
@@ -45,6 +59,8 @@ def main() -> int:
         threshold=args.threshold,
         max_age_minutes=args.max_age_minutes,
         max_ships=args.max_ships,
+        hard_cap_per_hour=args.hard_cap_per_hour,
+        hard_cap_per_day=args.hard_cap_per_day,
         dry_run=args.dry_run,
     )
     print(json.dumps(summary, default=str))

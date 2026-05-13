@@ -48,8 +48,13 @@ QUIVER_REPORT_AGE_DAYS = 2
 
 DEDUP_WINDOW_HOURS = 48
 ITEM_MAX_AGE_MINUTES = 90
-SCORE_THRESHOLD = 0.75
+SCORE_THRESHOLD = 0.90
 MAX_SHIPS_PER_FIRE = 1
+# Hard ceilings enforced against the seen.shipped=1 history. Prevents a
+# runaway loop (e.g. duplicate cron, threshold misconfig) from blasting
+# Publer / Substack and tripping platform rate limits.
+HARD_CAP_PER_HOUR = 2
+HARD_CAP_PER_DAY = 12
 FETCH_TIMEOUT = 15
 # Investing.com 403s anything that doesn't look like a real browser.
 USER_AGENT = (
@@ -114,6 +119,15 @@ def _prune_old(conn: sqlite3.Connection) -> None:
     cutoff = int(time.time()) - DEDUP_WINDOW_HOURS * 3600
     conn.execute("DELETE FROM seen WHERE ts < ?", (cutoff,))
     conn.commit()
+
+
+def _shipped_count_since(conn: sqlite3.Connection, seconds: int) -> int:
+    cutoff = int(time.time()) - seconds
+    row = conn.execute(
+        "SELECT COUNT(*) FROM seen WHERE shipped = 1 AND ts > ?",
+        (cutoff,),
+    ).fetchone()
+    return int(row[0] if row else 0)
 
 
 def _fetch_rss(feed_url: str) -> list[dict]:
@@ -340,6 +354,8 @@ def run_once(
     threshold: float = SCORE_THRESHOLD,
     max_age_minutes: int = ITEM_MAX_AGE_MINUTES,
     max_ships: int = MAX_SHIPS_PER_FIRE,
+    hard_cap_per_hour: int = HARD_CAP_PER_HOUR,
+    hard_cap_per_day: int = HARD_CAP_PER_DAY,
     dry_run: bool = False,
 ) -> dict:
     """Single watcher pass. Returns a summary dict (JSON-serializable).
@@ -347,6 +363,10 @@ def run_once(
     Per-fire flow: score every fresh+unseen item, mark all sub-threshold and
     losers as seen so they don't re-score next pass, then ship at most
     `max_ships` highest-scoring winners through the ARTICLE pipeline.
+
+    Hard caps are enforced against seen.shipped=1 over a 1h and 24h sliding
+    window. If either is hit, the pass scores nothing and ships nothing
+    (preserves quota and prevents a runaway loop from blasting Publer).
     """
     # Lazy import to avoid pulling all of pipeline_test on module import.
     _ensure_pipeline_on_path()
@@ -356,9 +376,8 @@ def run_once(
     conn = _conn()
     _prune_old(conn)
 
-    items = fetch_all()
     summary: dict = {
-        "fetched": len(items),
+        "fetched": 0,
         "new": 0,
         "fresh": 0,
         "scored": 0,
@@ -366,8 +385,29 @@ def run_once(
         "shipped": [],
         "rejected": [],
         "skipped_over_cap": [],
+        "skipped_rate_cap": [],
         "errors": [],
+        "rate_cap_tripped": None,
     }
+
+    shipped_last_hour = _shipped_count_since(conn, 3600)
+    shipped_last_day = _shipped_count_since(conn, 86400)
+    if shipped_last_hour >= hard_cap_per_hour or shipped_last_day >= hard_cap_per_day:
+        tripped = (
+            f"hour={shipped_last_hour}/{hard_cap_per_hour}"
+            if shipped_last_hour >= hard_cap_per_hour
+            else f"day={shipped_last_day}/{hard_cap_per_day}"
+        )
+        log.warning("breaking-news rate cap tripped (%s); pass yields nothing", tripped)
+        summary["rate_cap_tripped"] = tripped
+        summary["shipped_last_hour"] = shipped_last_hour
+        summary["shipped_last_day"] = shipped_last_day
+        return summary
+
+    items = fetch_all()
+    summary["fetched"] = len(items)
+    summary["shipped_last_hour"] = shipped_last_hour
+    summary["shipped_last_day"] = shipped_last_day
 
     candidates: list[dict] = []
     for item in items:
