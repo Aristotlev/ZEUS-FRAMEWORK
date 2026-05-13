@@ -1261,7 +1261,12 @@ def generate_article_text(
     if content_type == ContentType.ARTICLE:
         body_clause = (
             f"Body = {target_chars} characters — 3-4 tight lines max. "
-            f"Lead with the take, no setup. No 'read more' padding."
+            f"Lead with the take, no setup. No 'read more' padding. "
+            f"Do NOT write 'Flash News:' yourself — that prefix is added "
+            f"deterministically before publish. Use 2-4 relevant emojis to "
+            f"punch up the key beats (e.g. 🚨 for breaking, 📈 up moves, "
+            f"📉 down, 💰 deals, ⚠️ risk, 🛢️ oil, 🪙 crypto). "
+            f"No emoji spam, no decorative strings."
         )
     else:
         body_clause = (
@@ -1293,7 +1298,10 @@ def generate_article_text(
             f"Cite outlets by name only (e.g. 'Bloomberg reports...'). The post is "
             f"our own analysis — we don't link to the source.\n"
         )
-        max_tokens = 1100  # grounded prompts have more to weave in
+        # ARTICLE is short-form (target 120-220c) — give it ~120 tokens so the
+        # model can't drift into 5-paragraph essays even when the prompt clause
+        # is ignored. Other types keep the wider budget.
+        max_tokens = 120 if content_type == ContentType.ARTICLE else 1100
     else:
         # Fallback: no grounding available (fetch failed / manual --topic without
         # URL). Keep the legacy behaviour so the slot still ships rather than
@@ -1311,13 +1319,40 @@ def generate_article_text(
             f"- Tone: Bloomberg Terminal condensed. Concrete numbers, sectors, take.\n"
             f"- No hashtags. No 'in conclusion'. No filler.\n"
         )
-        max_tokens = 800
+        max_tokens = 120 if content_type == ContentType.ARTICLE else 800
 
     raw, cost, source = openrouter_chat(prompt, max_tokens=max_tokens)
     lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
     title = lines[0].lstrip("#").strip()
     body = "\n\n".join(lines[1:]) if len(lines) > 1 else raw
+    if content_type == ContentType.ARTICLE:
+        body = _format_article_body(body, max_chars=220)
     return title, body, cost, source
+
+
+_FLASH_NEWS_PREFIX = "Flash News: "
+
+
+def _format_article_body(body: str, max_chars: int = 220) -> str:
+    # Soft prompt rules ("3-4 tight lines", "lead with Flash News:") were being
+    # ignored by the writer LLM — breaking-news posts kept landing at 400-600c
+    # without the brand prefix. Enforce both deterministically: strip a duplicate
+    # prefix if the model added one, hard-cut at the last word boundary, then
+    # prepend so every ARTICLE fan-out is stamped consistently.
+    if not body:
+        return _FLASH_NEWS_PREFIX.rstrip()
+    core = body.lstrip()
+    # Drop any LLM-added "Flash News:" / "FLASH NEWS:" lead so we don't double-stamp.
+    low = core.lower()
+    if low.startswith("flash news:"):
+        core = core[len("flash news:"):].lstrip(" -—:")
+    body_budget = max_chars - len(_FLASH_NEWS_PREFIX)
+    if len(core) > body_budget:
+        cut = core.rfind(" ", 0, body_budget - 1)
+        if cut < body_budget // 2:
+            cut = body_budget - 1
+        core = core[:cut].rstrip(" ,;:.\n") + "…"
+    return _FLASH_NEWS_PREFIX + core
 
 
 _URL_RX = re.compile(r"https?://\S+", re.IGNORECASE)
