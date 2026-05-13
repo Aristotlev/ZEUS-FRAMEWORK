@@ -2008,16 +2008,42 @@ def _publer_verify_post_created(account_id: str, text_snippet: str, job_id: str,
     # matching against a post that didn't exist). Raise if the post hasn't
     # materialized; the caller (_schedule_one) converts that to FAILED: so
     # the watcher finalises the row instead of looping.
+    #
+    # 2026-05-13: if EVERY lookup attempt hits a 429 (we burned the
+    # rate-limit budget on diagnostics), don't false-positive a phantom.
+    # The schedule POST already returned 200 with a job_id — the post is
+    # almost certainly there, we just can't read it. Trust the schedule.
     if not job_id or job_id.startswith("FAILED"):
         return
     deadline = time.monotonic() + timeout_s
+    saw_non_429 = False
     while time.monotonic() < deadline:
-        if _publer_post_id_from_job(job_id) or _publer_find_post_id(account_id, text_snippet):
-            return
+        try:
+            r = requests.get(f"{PUBLER_BASE}/job_status/{job_id}", headers=_publer_headers(), timeout=15)
+            if r.status_code == 429:
+                pass  # rate-limited; keep retrying but don't count this as a "no" answer
+            else:
+                saw_non_429 = True
+                if r.status_code == 200:
+                    data = r.json()
+                    posts = data.get("posts") or (data.get("payload") or {}).get("posts") or []
+                    for p in posts:
+                        if p.get("id") or p.get("post_id"):
+                            return
+                if _publer_find_post_id(account_id, text_snippet):
+                    return
+        except Exception as e:
+            log.warning(f"_publer_verify_post_created lookup error: {e}")
         time.sleep(3)
+    if not saw_non_429:
+        log.warning(
+            f"Publer schedule job_id={job_id} accepted (200) but verify GET was "
+            f"rate-limited for {timeout_s}s — trusting the schedule, not raising."
+        )
+        return
     raise RuntimeError(
         f"Publer accepted schedule job_id={job_id} but no Post object appeared "
-        f"in /posts within {timeout_s}s — silent drop (rate-limit?). "
+        f"in /posts within {timeout_s}s — silent drop. "
         f"Refusing to enqueue a phantom row."
     )
 
