@@ -1219,7 +1219,10 @@ def generate_article_text(
     the targets when grounding is on.
     """
     target_chars = {
-        ContentType.ARTICLE: "250-450",
+        # ARTICLE = breaking-news fan-out: 3-4 punchy lines max, no setup.
+        # Lead with the take, not the recap. Truncation on IG/LI is fine —
+        # the body fits Twitter Premium (480c) and reads cleanly on FB/IG.
+        ContentType.ARTICLE: "120-220",
         ContentType.LONG_ARTICLE: "550-900",
         # Carousel body MUST be <450 chars total — visuals do the heavy lifting.
         ContentType.CAROUSEL: "300-440",
@@ -1254,6 +1257,18 @@ def generate_article_text(
             + "\n".join(ent_lines)
         )
 
+    if content_type == ContentType.ARTICLE:
+        body_clause = (
+            f"Body = {target_chars} characters — 3-4 tight lines max. "
+            f"Lead with the take, no setup. No 'read more' padding."
+        )
+    else:
+        body_clause = (
+            f"Body = {target_chars} characters, long enough that "
+            f"Instagram (125c), LinkedIn (210c) and Facebook (480c) all "
+            f"show a 'read more' truncation."
+        )
+
     if grounding_blocks:
         prompt = (
             f"You are a market analyst writing an ORIGINAL take on a current news story. "
@@ -1270,9 +1285,7 @@ def generate_article_text(
             f"(e.g. 'X reports A while Y notes B'). Don't force it if angles align.\n"
             f"- End with a forward-looking line (second-order effect, who wins/loses, what to watch). "
             f"Not a summary.\n"
-            f"- Format: first line = punchy 5-10 word title (no dates). "
-            f"Body = {target_chars} characters, long enough that Instagram (125c), LinkedIn (210c) "
-            f"and Facebook (480c) all show a 'read more' truncation.\n"
+            f"- Format: first line = punchy 5-10 word title (no dates). {body_clause}\n"
             f"- Tone: Bloomberg Terminal condensed. Concrete numbers, sectors, take.\n"
             f"- No hashtags. No 'in conclusion'. No filler. No 'According to the article'.\n"
         )
@@ -1290,9 +1303,7 @@ def generate_article_text(
             f"{_niche_clause()}"
             f"Format:\n"
             f"- First line: a punchy 5-10 word title (no dates).\n"
-            f"- Body: {target_chars} characters. The body must be long enough that Instagram, "
-            f"LinkedIn and Facebook all truncate it with a 'read more' affordance "
-            f"(thresholds 125 / 210 / 480 chars respectively).\n"
+            f"- {body_clause}\n"
             f"- Tone: Bloomberg Terminal condensed. Concrete numbers, sectors, take.\n"
             f"- No hashtags. No 'in conclusion'. No filler.\n"
         )
@@ -1392,7 +1403,11 @@ def generate_media_for(
     Only consulted for short_video_avatar / long_video_avatar.
     """
     out_dir = _local_dir(piece)
-    if piece.content_type in (ContentType.ARTICLE, ContentType.LONG_ARTICLE):
+    if piece.content_type == ContentType.ARTICLE:
+        # ARTICLE = text-only by design. Breaking-news fan-out ships pure
+        # captions to Publer + Substack Note; no hero image, no media spend.
+        pass
+    elif piece.content_type == ContentType.LONG_ARTICLE:
         _gen_article_image(piece, out_dir, quality_override=quality_override)
     elif piece.content_type == ContentType.CAROUSEL:
         _gen_carousel_images(piece, out_dir, slides, quality_override=quality_override)
