@@ -69,6 +69,7 @@ _load_env_file()
 
 from lib import (  # noqa: E402
     ContentPiece,
+    ContentType,
     LIMITS,
     NotionArchive,
     ledger_append,
@@ -536,11 +537,17 @@ def _process_pass() -> tuple[int, int, int]:
                 ledger_append(piece)
             except Exception as e:
                 log.error(f"  ledger_append failed: {e}")
-            try:
-                backend = send_pipeline_summary(piece)
-                log.info(f"  notified -> backend={backend}")
-            except Exception as e:
-                log.error(f"  email failed: {e}")
+            # ARTICLE (short-form) is mute by design — breaking-news cron
+            # fires too often to email per run. LONG_ARTICLE / CAROUSEL /
+            # video types still email when their permalinks resolve.
+            if piece.content_type == ContentType.ARTICLE:
+                log.info("  email suppressed — ARTICLE is mute by design")
+            else:
+                try:
+                    backend = send_pipeline_summary(piece)
+                    log.info(f"  notified -> backend={backend}")
+                except Exception as e:
+                    log.error(f"  email failed: {e}")
             archive_buffer.append({**row, "final_status": new_status})
             resolved += 1
         else:

@@ -2534,7 +2534,12 @@ def run(
         and publish_error is None
         and media_error is None
     )
-    if defer_email:
+    # ARTICLE (short-form) is mute: breaking-news cron fires it on every
+    # market-moving headline, so emailing per run would flood the inbox.
+    # LONG_ARTICLE / CAROUSEL / video types still email as before.
+    if piece.content_type == ContentType.ARTICLE:
+        log.info("  email suppressed — ARTICLE is mute by design")
+    elif defer_email:
         log.info(
             "  email deferred to publish_watcher — will land when post URLs "
             "resolve (cron: zeus-content-publish-watcher every 10 min)"
@@ -2588,11 +2593,14 @@ def _emit_picker_failure(content_type: ContentType, error: Exception) -> None:
         ledger_append(piece)
     except Exception as e:
         log.warning(f"  ledger_append failed (picker-failure path): {e}")
-    try:
-        backend = send_pipeline_summary(piece)
-        log.info(f"  picker-failure email sent -> backend={backend}")
-    except Exception as e:
-        log.warning(f"  picker-failure email failed: {e}")
+    if piece.content_type == ContentType.ARTICLE:
+        log.info("  picker-failure email suppressed — ARTICLE is mute by design")
+    else:
+        try:
+            backend = send_pipeline_summary(piece)
+            log.info(f"  picker-failure email sent -> backend={backend}")
+        except Exception as e:
+            log.warning(f"  picker-failure email failed: {e}")
 
 
 def main() -> int:
