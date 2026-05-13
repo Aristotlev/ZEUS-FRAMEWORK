@@ -90,8 +90,11 @@ SCORE_THRESHOLD = 0.75
 MAX_SHIPS_PER_FIRE = 1
 # Hard ceilings enforced against the seen.shipped=1 history. Prevents a
 # runaway loop (e.g. duplicate cron, threshold misconfig) from blasting
-# Publer / Substack and tripping platform rate limits.
-HARD_CAP_PER_HOUR = 6
+# Publer / Substack and tripping platform rate limits. Cut from 6→4
+# on 2026-05-13: at 5+/hr sustained Publer silently dropped half the
+# Twitter schedules (200+job_id but no Post created), leaving rows
+# stuck `pending` forever in the watcher queue.
+HARD_CAP_PER_HOUR = 4
 HARD_CAP_PER_DAY = 120
 FETCH_TIMEOUT = 15
 # Investing.com 403s anything that doesn't look like a real browser.

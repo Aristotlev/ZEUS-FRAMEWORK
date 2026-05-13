@@ -324,15 +324,15 @@ def _build_jobs(niche: List[str]):
         },
         {
             "name": "zeus-content-breaking-news",
-            # Every 10 min. Polls 3 RSS feeds + Finnhub general news, scores
-            # fresh headlines, auto-publishes ARTICLE for anything >= 0.7.
-            # Dedup window (48h) lives in SQLite at ~/.hermes/breaking_news_seen.db
-            # so the same headline doesn't re-ship when feeds overlap or
-            # syndicate from each other. Cheap per fire: 3-5 HTTP gets + a
-            # handful of openrouter_chat calls. Real cost is the ARTICLE
-            # pipeline that fires when scorer says yes — uncapped, so the
-            # threshold is the only gate.
-            "schedule": "*/10 * * * *",
+            # Every 15 min. Was */10 with cap 6/hr — Publer's workspace
+            # rate limit started silently dropping ARTICLE Twitter
+            # schedules around 5/hr sustained (200 + job_id but no Post
+            # object ever created). */15 + cap 4/hr keeps us under the
+            # cliff while still giving 4 breaking-news windows per hour.
+            # Cheap per fire: 3-5 HTTP gets + a handful of openrouter
+            # calls. Real cost is the ARTICLE pipeline that fires when
+            # scorer says yes — capped at 4/hr in lib/breaking_news_watcher.py.
+            "schedule": "*/15 * * * *",
             "prompt": breaking_news,
         },
     ]
