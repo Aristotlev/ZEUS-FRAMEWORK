@@ -1342,7 +1342,9 @@ def generate_article_text(
         # just "Flash News:" downstream (Substack was shipping the bare
         # prefix when grounding context leaked URLs into the body).
         body = _strip_urls_from_body(body)
-        body = _format_article_body(body, max_chars=270)
+        # Hard ceiling for short-form: 258 chars total (prefix + body),
+        # fits well under every platform's single-post cap.
+        body = _format_article_body(body, max_chars=258)
     return title, body, cost, source
 
 
