@@ -128,6 +128,7 @@ def _request(method: str, path: str, *, json_body: Optional[dict] = None, timeou
 
 
 _ADMIN_USER_ID: Optional[int] = None
+_NOTE_AUTHOR_HANDLE: Optional[str] = None
 
 
 def _admin_user_id() -> int:
@@ -147,6 +148,39 @@ def _admin_user_id() -> int:
         raise SubstackError(f"No admin user found in /publication/users: {str(users)[:200]}")
     _ADMIN_USER_ID = admin["id"]
     return _ADMIN_USER_ID
+
+
+def _note_author_handle() -> Optional[str]:
+    """Return the @handle used for the public Note URL.
+
+    Notes live at `https://substack.com/@<handle>/note/c-<id>` — the
+    publication-scoped `/notes/note/c-<id>` URL we used to construct
+    returns 404, so the user clicks through and sees an empty publication
+    shell instead of the note body (every Note URL the pipeline emitted
+    before 2026-05-13 was broken this way).
+
+    /api/v1/publication/users does NOT carry the handle. The reliable
+    source is the comment.handle field on the user's own Notes feed —
+    cached per-process the first time we publish or look one up.
+    """
+    global _NOTE_AUTHOR_HANDLE
+    if _NOTE_AUTHOR_HANDLE:
+        return _NOTE_AUTHOR_HANDLE
+    try:
+        feed = _request("GET", "/api/v1/notes")
+    except Exception as exc:
+        log.warning(f"could not resolve note handle: {exc}")
+        return None
+    items = feed.get("items") if isinstance(feed, dict) else None
+    if not isinstance(items, list):
+        return None
+    for it in items:
+        comment = (it or {}).get("comment") or {}
+        handle = comment.get("handle")
+        if isinstance(handle, str) and handle.strip():
+            _NOTE_AUTHOR_HANDLE = handle.strip()
+            return _NOTE_AUTHOR_HANDLE
+    return None
 
 
 def _request_list(method: str, path: str, *, timeout: int = 30) -> list:
@@ -270,11 +304,31 @@ def publish_note(body: str) -> str:
     }
     res = _request("POST", "/api/v1/comment/feed", json_body=payload)
 
-    note_id = res.get("id") or (res.get("comment") or {}).get("id")
+    comment = res.get("comment") if isinstance(res, dict) else None
+    note_id = res.get("id") or ((comment or {}).get("id"))
+    # Prefer any canonical URL the API hands back.
     for key in ("canonical_url", "url"):
         v = res.get(key)
         if isinstance(v, str) and v.startswith("http"):
             return v
+    # The POST response sometimes includes the author handle inline — use it
+    # before falling back to a lookup.
+    handle: Optional[str] = None
+    if isinstance(comment, dict):
+        h = comment.get("handle")
+        if isinstance(h, str) and h.strip():
+            handle = h.strip()
+    if not handle:
+        handle = _note_author_handle()
+    if note_id and handle:
+        # Public Notes URL — works without a session, no 404.
+        return f"https://substack.com/@{handle}/note/c-{note_id}"
     if note_id:
+        # Last-resort fallback (still 404 in the browser, but at least the id
+        # lands in the email/ledger so the run is debuggable).
+        log.warning(
+            "substack note published (id=%s) but no @handle resolved — "
+            "URL will 404; check /api/v1/notes auth", note_id,
+        )
         return f"{_publication_url()}/notes/note/c-{note_id}"
     return _publication_url()
