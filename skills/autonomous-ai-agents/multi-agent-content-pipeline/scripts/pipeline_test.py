@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -1288,6 +1289,9 @@ def generate_article_text(
             f"- Format: first line = punchy 5-10 word title (no dates). {body_clause}\n"
             f"- Tone: Bloomberg Terminal condensed. Concrete numbers, sectors, take.\n"
             f"- No hashtags. No 'in conclusion'. No filler. No 'According to the article'.\n"
+            f"- DO NOT include any URLs, links, or 'h/t' citations in the body. "
+            f"Cite outlets by name only (e.g. 'Bloomberg reports...'). The post is "
+            f"our own analysis — we don't link to the source.\n"
         )
         max_tokens = 1100  # grounded prompts have more to weave in
     else:
@@ -1314,6 +1318,27 @@ def generate_article_text(
     title = lines[0].lstrip("#").strip()
     body = "\n\n".join(lines[1:]) if len(lines) > 1 else raw
     return title, body, cost, source
+
+
+_URL_RX = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def _strip_urls_from_body(body: str) -> str:
+    """Remove any URLs the writer LLM included.
+
+    Posts are our own analysis — we don't link to the source. URLs in the body
+    also trigger platform-side link-preview cards (Twitter/Facebook fetch
+    og:image from the linked page), which makes our short-form posts look like
+    link-shares of someone else's article.
+    """
+    if not body:
+        return body
+    stripped = _URL_RX.sub("", body)
+    # Collapse the whitespace artifacts left where URLs were removed.
+    stripped = re.sub(r"[ \t]{2,}", " ", stripped)
+    stripped = re.sub(r" *\n *", "\n", stripped)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+    return stripped.strip()
 
 
 def caption_for(piece: ContentPiece, platform: str) -> str:
@@ -2450,7 +2475,7 @@ def run(
             entities=entities,
         )
     piece.title = title
-    piece.body = body
+    piece.body = _strip_urls_from_body(body)
     piece.add_cost(ORCHESTRATOR_MODEL, text_cost, kind="text", source=text_source)
     log.info(
         f"  text -> title='{title}' body={len(body)}c run_id={piece.run_id} "
