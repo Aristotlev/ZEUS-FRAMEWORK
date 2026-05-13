@@ -1221,9 +1221,10 @@ def generate_article_text(
     """
     target_chars = {
         # ARTICLE = breaking-news fan-out: 3-4 punchy lines max, no setup.
-        # Lead with the take, not the recap. Body fits Twitter Premium (480c)
-        # as a single tweet — line-broken so it reads as 3-4 catchy beats.
-        ContentType.ARTICLE: "320-420",
+        # Lead with the take, not the recap. Body must fit a single tweet on
+        # ANY Twitter tier (free 280c) — never thread. Line-broken so it
+        # reads as 3-4 catchy beats.
+        ContentType.ARTICLE: "180-260",
         ContentType.LONG_ARTICLE: "550-900",
         # Carousel body MUST be <450 chars total — visuals do the heavy lifting.
         ContentType.CAROUSEL: "300-440",
@@ -1303,11 +1304,11 @@ def generate_article_text(
             f"Cite outlets by name only (e.g. 'Bloomberg reports...'). The post is "
             f"our own analysis — we don't link to the source.\n"
         )
-        # ARTICLE is short-form (target 320-420c, 3-4 lines). 220 tokens
-        # (~880c headroom) is enough for the model to finish 4 sentences cleanly
+        # ARTICLE is short-form (target 180-260c, 3-4 lines). 140 tokens
+        # (~560c headroom) is enough for the model to finish 4 sentences cleanly
         # without trailing off mid-thought — _format_article_body still clamps
         # if it overshoots.
-        max_tokens = 220 if content_type == ContentType.ARTICLE else 1100
+        max_tokens = 140 if content_type == ContentType.ARTICLE else 1100
     else:
         # Fallback: no grounding available (fetch failed / manual --topic without
         # URL). Keep the legacy behaviour so the slot still ships rather than
@@ -1332,7 +1333,7 @@ def generate_article_text(
     title = lines[0].lstrip("#").strip()
     body = "\n\n".join(lines[1:]) if len(lines) > 1 else raw
     if content_type == ContentType.ARTICLE:
-        body = _format_article_body(body, max_chars=440)
+        body = _format_article_body(body, max_chars=270)
     return title, body, cost, source
 
 
@@ -1340,7 +1341,7 @@ _FLASH_NEWS_PREFIX = "Flash News: "
 _SENTENCE_SPLIT_RX = re.compile(r"(?<=[.!?…])\s+(?=[A-Z0-9🚨📈📉💰⚠🛢🪙🔥💥💸🟢🔴⚡])")
 
 
-def _format_article_body(body: str, max_chars: int = 440) -> str:
+def _format_article_body(body: str, max_chars: int = 270) -> str:
     # The writer LLM ignores soft "3-4 tight lines" prompt rules — it returns a
     # dense single paragraph. We deterministically reshape into 3-4 line-broken
     # sentences so the post renders as catchy beats on every platform, drop a
@@ -2207,6 +2208,7 @@ def _wait_for_posts_live(piece: ContentPiece, *, max_wait_s: int = 720, poll_int
             )
             if (
                 platform == "twitter"
+                and piece.content_type != ContentType.ARTICLE
                 and needs_thread(piece.body)
                 and media_count <= 1
             ):
@@ -2379,8 +2381,12 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
         # Twitter only: bodies >480 chars become a text thread (mechanical
         # chunking of the same body, not a rewrite). Multi-image carousels
         # always ship as a single native gallery tweet — never thread.
+        # ARTICLE is short-form by mandate — must always be one tweet, even
+        # if length somehow drifts (e.g. env tier misconfig leaves free-tier
+        # 280-char trigger active).
         if (
             platform == "twitter"
+            and piece.content_type != ContentType.ARTICLE
             and needs_thread(piece.body)
             and len(platform_media) <= 1
         ):

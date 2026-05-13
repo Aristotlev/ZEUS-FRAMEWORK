@@ -276,6 +276,7 @@ def _resolve_one(piece: ContentPiece, post_id_cache: dict) -> dict:
                 )
                 if (
                     platform == "twitter"
+                    and piece.content_type != ContentType.ARTICLE
                     and needs_thread(piece.body)
                     and media_count <= 1
                 ):
