@@ -38,6 +38,13 @@ RSS_FEEDS: list[str] = [
     "https://investinglive.com/feed/",
 ]
 FINNHUB_NEWS_URL = "https://finnhub.io/api/v1/news"
+# Quiver Quant's beta endpoint serves live Congress trading disclosures with
+# no auth. Fields: Representative, BioGuideID, ReportDate, TransactionDate,
+# Ticker, Transaction, Range, House, Amount, Party.
+QUIVER_CONGRESS_URL = "https://api.quiverquant.com/beta/live/congresstrading"
+# Quiver returns hundreds of historical rows. Cap to disclosures with
+# ReportDate within the last N days so we don't backfill on first poll.
+QUIVER_REPORT_AGE_DAYS = 2
 
 DEDUP_WINDOW_HOURS = 48
 ITEM_MAX_AGE_MINUTES = 90
@@ -188,11 +195,86 @@ def _fetch_finnhub() -> list[dict]:
     return items
 
 
+def _fetch_quiver_congress() -> list[dict]:
+    """Pull live Congress disclosures from Quiver (free, no auth).
+
+    Synthesizes a punchy headline per row so the scorer + ARTICLE pipeline
+    see disclosures as just another news item. Dedup key (built upstream)
+    is `(source, url, title)` — title contains representative + ticker +
+    transaction date, which is enough for a stable id.
+    """
+    try:
+        r = requests.get(
+            QUIVER_CONGRESS_URL,
+            timeout=FETCH_TIMEOUT,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        )
+        r.raise_for_status()
+        rows = r.json() or []
+    except Exception as exc:
+        log.warning("quiver congress fetch failed: %s", exc)
+        return []
+    if not isinstance(rows, list):
+        log.warning("quiver congress returned non-list: %r", type(rows).__name__)
+        return []
+
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=QUIVER_REPORT_AGE_DAYS)
+    items: list[dict] = []
+    for row in rows:
+        try:
+            report_str = (row.get("ReportDate") or "").strip()
+            if not report_str:
+                continue
+            report_date = datetime.strptime(report_str, "%Y-%m-%d").date()
+            if report_date < cutoff:
+                continue
+            rep = (row.get("Representative") or "").strip()
+            ticker = (row.get("Ticker") or "").strip().upper()
+            txn_type = (row.get("Transaction") or "").strip()
+            amount_range = (row.get("Range") or "").strip()
+            house = (row.get("House") or "").strip()
+            party = (row.get("Party") or "").strip()
+            txn_date = (row.get("TransactionDate") or "").strip()
+            if not rep or not ticker or not txn_type:
+                continue
+
+            title_pref = "Sen." if house.lower() == "senate" else "Rep."
+            party_tag = f" ({party})" if party else ""
+            amount_part = f" {amount_range}" if amount_range else ""
+            txn_lower = txn_type.lower()
+            verb = (
+                "BOUGHT" if "purchase" in txn_lower or "buy" in txn_lower
+                else "SOLD" if "sale" in txn_lower or "sell" in txn_lower
+                else txn_type.upper()
+            )
+            traded_part = f" on {txn_date}" if txn_date else ""
+            title = (
+                f"{title_pref} {rep}{party_tag} {verb}{amount_part} of ${ticker}"
+                f"{traded_part} (disclosed {report_str})"
+            )
+            url = "https://www.quiverquant.com/congresstrading/"
+            items.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "published_at": datetime.combine(
+                        report_date, datetime.min.time(), tzinfo=timezone.utc
+                    ),
+                    "source": "quiver-congress",
+                }
+            )
+        except Exception as exc:
+            log.debug("quiver row skipped (%s): %r", exc, row)
+            continue
+    return items
+
+
 def fetch_all() -> list[dict]:
     items: list[dict] = []
     for feed_url in RSS_FEEDS:
         items.extend(_fetch_rss(feed_url))
     items.extend(_fetch_finnhub())
+    items.extend(_fetch_quiver_congress())
     return items
 
 
@@ -201,6 +283,12 @@ def _is_fresh(item: dict, max_age_minutes: int = ITEM_MAX_AGE_MINUTES) -> bool:
     if not pub:
         # No timestamp — treat as fresh, dedup handles repeats.
         return True
+    # Quiver disclosures have date-only ReportDate (midnight UTC). Skip the
+    # max-age check for them — disclosure rows are gated upstream by
+    # QUIVER_REPORT_AGE_DAYS, and dedup keeps us from re-shipping ones we've
+    # already seen.
+    if item.get("source") == "quiver-congress":
+        return True
     return (datetime.now(timezone.utc) - pub) <= timedelta(minutes=max_age_minutes)
 
 
@@ -208,17 +296,22 @@ SCORER_PROMPT = """\
 Score this financial news headline 0.00-1.00 for how Watcher.Guru-worthy it is.
 Watcher.Guru posts: market-moving events, major POTUS/Fed/Treasury actions, big
 company news (M&A, earnings beats/misses, exec changes), macro prints (CPI, jobs,
-GDP, rate decisions), geopolitics/conflict that moves markets, and large crypto
-moves. They do NOT post: op-eds, listicles, evergreen commentary, generic
-analyst chatter, or already-stale stories.
+GDP, rate decisions), geopolitics/conflict that moves markets, large crypto
+moves, and notable Congressional stock disclosures (big-name politicians or
+big-dollar trades). They do NOT post: op-eds, listicles, evergreen commentary,
+generic analyst chatter, or already-stale stories.
 
 HEADLINE: {title}
 
 Rubric:
-  0.90+   blockbuster: surprise Fed move, war escalation, top-cap M&A, surprise CPI
-  0.70-89 market-moving: notable earnings, mid-cap M&A, exec firing, sanctions, large crypto flow
-  0.50-69 noteworthy: sector trend, analyst calls, commodity moves
-  <0.50   generic/commentary/listicle/repeat
+  0.90+   blockbuster: surprise Fed move, war escalation, top-cap M&A, surprise CPI,
+          well-known politician (Pelosi/Crenshaw/Tuberville/Paul) $100K+ disclosure
+  0.70-89 market-moving: notable earnings, mid-cap M&A, exec firing, sanctions,
+          large crypto flow, Senate/House member $50K+ trade in a major stock
+  0.50-69 noteworthy: sector trend, analyst calls, commodity moves, modest
+          Congressional disclosure in a popular ticker
+  <0.50   generic/commentary/listicle/repeat, tiny Congressional trade by an
+          obscure rep, routine Form 13F/10Q filings
 
 Respond with ONLY the number (e.g. "0.84"). No prose.
 """
