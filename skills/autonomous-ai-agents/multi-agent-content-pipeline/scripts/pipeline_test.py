@@ -2073,17 +2073,44 @@ def _publer_note_429(resp=None) -> None:
         log.warning(f"Publer rate-limited (HTTP 429) — pausing Publer GETs for {wait:.0f}s")
 
 
+# 3 attempts with widening backoff (0s → 30s → 90s, ~2 min total). Tuned to
+# survive the Publer workspace-wide 429 windows seen 2026-05-13/14 (where a
+# burst of upload attempts from the long-article + breaking-news pipelines
+# tripped the global limit). Beyond 3 attempts we stop and let the caller
+# decide whether to fall back to text-only — sitting here longer than 2 min
+# starves the run's overall budget and risks the entrypoint SIGKILL.
+_PUBLER_UPLOAD_RETRY_DELAYS_S = [30, 90]
+
+
 def _publer_upload(local_path: str, mime: str) -> str:
-    with open(local_path, "rb") as fh:
-        r = requests.post(
-            f"{PUBLER_BASE}/media",
-            headers=_publer_headers(json_body=False),
-            files={"file": (os.path.basename(local_path), fh, mime)},
-            timeout=120,
+    last_status = 0
+    last_body = ""
+    for attempt in range(len(_PUBLER_UPLOAD_RETRY_DELAYS_S) + 1):
+        with open(local_path, "rb") as fh:
+            r = requests.post(
+                f"{PUBLER_BASE}/media",
+                headers=_publer_headers(json_body=False),
+                files={"file": (os.path.basename(local_path), fh, mime)},
+                timeout=120,
+            )
+        if r.status_code == 200:
+            return r.json()["id"]
+        last_status, last_body = r.status_code, r.text[:300]
+        # Retry only on transient errors (429 rate-limit + 5xx server errors).
+        # 4xx other than 429 (401 auth, 413 payload too large, 415 mime, etc.)
+        # are deterministic failures — retrying won't help and just wastes the
+        # workspace's already-thin Publer budget.
+        is_transient = r.status_code == 429 or r.status_code >= 500
+        if not is_transient or attempt >= len(_PUBLER_UPLOAD_RETRY_DELAYS_S):
+            break
+        delay = _PUBLER_UPLOAD_RETRY_DELAYS_S[attempt]
+        log.warning(
+            f"Publer media upload returned {r.status_code} "
+            f"(attempt {attempt + 1}/{len(_PUBLER_UPLOAD_RETRY_DELAYS_S) + 1}) — "
+            f"retrying in {delay}s"
         )
-    if r.status_code != 200:
-        raise RuntimeError(f"Publer media upload failed {r.status_code}: {r.text[:300]}")
-    return r.json()["id"]
+        time.sleep(delay)
+    raise RuntimeError(f"Publer media upload failed {last_status}: {last_body}")
 
 
 def _publer_verify_post_created(account_id: str, text_snippet: str, job_id: str, timeout_s: int = 30) -> None:
@@ -2489,14 +2516,35 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
 
     media_ids: list[str] = []
     if piece.video and piece.video.local_path:
+        # Video pieces (SHORT_VIDEO_AVATAR, LONG_VIDEO): the video IS the
+        # content. A failed upload after retries kills the run — don't ship
+        # an "audio-less" / text-only version.
         media_ids = [_publer_upload(piece.video.local_path, "video/mp4")]
     else:
         images_with_path = [img for img in piece.images if img.local_path]
         if images_with_path:
-            with ThreadPoolExecutor(max_workers=min(8, len(images_with_path))) as pool:
-                media_ids = list(
-                    pool.map(lambda img: _publer_upload(img.local_path, "image/png"), images_with_path)
+            try:
+                with ThreadPoolExecutor(max_workers=min(8, len(images_with_path))) as pool:
+                    media_ids = list(
+                        pool.map(lambda img: _publer_upload(img.local_path, "image/png"), images_with_path)
+                    )
+            except RuntimeError as upload_err:
+                # CAROUSEL: the slides ARE the content — re-raise so the run
+                # fails loudly and the next cron tick retries fresh.
+                # ARTICLE / LONG_ARTICLE: image is decoration. A persistent
+                # Publer 429 used to lose the entire post (be29081f6c6e Nebius
+                # 2026-05-14: 1661c body + Notion archive thrown away because
+                # one upload returned 429). Ship text-only instead — Substack
+                # gets the post + Twitter / LI / FB get the body without an
+                # image. The Notion archive still shows the generated image so
+                # we can manually re-attach if needed.
+                if piece.content_type == ContentType.CAROUSEL:
+                    raise
+                log.warning(
+                    f"Publer media upload failed after retries — shipping "
+                    f"text-only for {piece.content_type.value}: {upload_err}"
                 )
+                media_ids = []
 
     # 2) Schedule per platform — in parallel. Each platform is an independent
     # Publer API call; sequential adds ~5-10s, parallel collapses to ~one round-trip.
