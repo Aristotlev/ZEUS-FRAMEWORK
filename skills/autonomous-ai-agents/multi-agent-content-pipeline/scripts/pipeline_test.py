@@ -2097,16 +2097,14 @@ def _publer_schedule(provider: str, account_id: str, post_type: str, text: str, 
         "text": text,
         "media": [{"id": mid} for mid in media_ids],
     }
-    # X long-form: Publer's docs require BOTH a top-level "status" network
-    # type AND details.type="long_post" — sending "photo" with the long_post
-    # detail makes Publer silently strip the detail and post a regular
-    # truncated/threaded tweet (the symptom we just got burned by on
-    # LONG_ARTICLE runs, body=2133c → 4-tweet thread on X). Setting
-    # type="status" lets the long_post flag survive even when media is
-    # attached — X Premium accepts inline media on long-form tweets.
-    if provider == "twitter" and len(text) > 280:
-        network["type"] = "status"
-        network["details"] = {"type": "long_post"}
+    # X long-form: NO type/details forcing here. Premium X auto-renders
+    # bodies >280c as a single long-form tweet when type="photo"+media is
+    # sent. Forcing type="status"+details.long_post (c77444a) made Publer
+    # drop the media array silently — verified 2026-05-14: post
+    # 6a0573a2bca5b664f42350f3 came back media=None, no image on X. The
+    # needs_thread guard for LONG_ARTICLE downstream prevents client-side
+    # chunking, so a plain type="photo" payload ships the full long body
+    # WITH the image attached.
     payload = {
         "bulk": {
             "state": "scheduled",
