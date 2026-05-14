@@ -1224,7 +1224,13 @@ def generate_article_text(
         # Lead with the take, not the recap. Body must fit a single tweet on
         # ANY Twitter tier (free 280c) — never thread. Line-broken so it
         # reads as 3-4 catchy beats.
-        ContentType.ARTICLE: "180-260",
+        # Target deliberately well under the 240c hard cap in
+        # _format_article_body — at "180-260" the LLM regularly landed at
+        # 250-260c with a long-run lead that overflowed the body budget,
+        # triggering the word-cut/ellipsis path → visible "…" truncation
+        # on X. 140-200c leaves room for the 12c "Flash News: " prefix +
+        # natural variance without ever bumping the cap.
+        ContentType.ARTICLE: "140-200",
         ContentType.LONG_ARTICLE: "550-900",
         # Carousel body MUST be <450 chars total — visuals do the heavy lifting.
         ContentType.CAROUSEL: "300-440",
@@ -1261,12 +1267,14 @@ def generate_article_text(
 
     if content_type == ContentType.ARTICLE:
         body_clause = (
-            f"Body = {target_chars} characters total, written as EXACTLY 3-4 "
+            f"Body = {target_chars} characters total, written as EXACTLY 3 "
             f"separate lines, ONE newline between each line (no blank lines). "
-            f"Each line is a complete, punchy sentence — no run-on paragraphs. "
+            f"Each line MUST be a complete sentence ending in '.', '!' or "
+            f"'?', and each line MUST be ≤ 70 characters. No semicolons, no "
+            f"em-dashes, no run-on clauses — short period-terminated beats. "
             f"Lead with the take, no setup. No 'read more' padding. "
             f"Do NOT write 'Flash News:' yourself — that prefix is added "
-            f"deterministically before publish. Use 2-4 relevant emojis spread "
+            f"deterministically before publish. Use 2-3 relevant emojis spread "
             f"across the lines (e.g. 🚨 breaking, 📈 up, 📉 down, 💰 deals, "
             f"⚠️ risk, 🛢️ oil, 🪙 crypto). One emoji per line max, no clusters. "
             f"Example shape:\n"
@@ -1304,11 +1312,13 @@ def generate_article_text(
             f"Cite outlets by name only (e.g. 'Bloomberg reports...'). The post is "
             f"our own analysis — we don't link to the source.\n"
         )
-        # ARTICLE is short-form (target 180-260c, 3-4 lines). 140 tokens
-        # (~560c headroom) is enough for the model to finish 4 sentences cleanly
-        # without trailing off mid-thought — _format_article_body still clamps
-        # if it overshoots.
-        max_tokens = 140 if content_type == ContentType.ARTICLE else 1100
+        # ARTICLE is short-form (target 140-200c, 3 short lines). 110 tokens
+        # (~440c headroom) lets the model finish 3 sentences cleanly without
+        # leaving room to spiral into a long-run paragraph. The lower ceiling
+        # is what keeps _format_article_body's truncation path from firing —
+        # without it, the model would happily produce 350-400c bodies that
+        # blow the 228c body_budget and force a cut.
+        max_tokens = 110 if content_type == ContentType.ARTICLE else 1100
     else:
         # Fallback: no grounding available (fetch failed / manual --topic without
         # URL). Keep the legacy behaviour so the slot still ships rather than
@@ -1342,9 +1352,13 @@ def generate_article_text(
         # just "Flash News:" downstream (Substack was shipping the bare
         # prefix when grounding context leaked URLs into the body).
         body = _strip_urls_from_body(body)
-        # Hard ceiling for short-form: 258 chars total (prefix + body),
-        # fits well under every platform's single-post cap.
-        body = _format_article_body(body, max_chars=258)
+        # Hard ceiling for short-form: 240 chars total (prefix + body) —
+        # leaves a 40c safety margin under Twitter's 280c cap so we never
+        # ship a post that ends in "…". Coordinated with the 140-200c
+        # LLM target above and max_tokens=110: the model should land well
+        # inside this budget without _format_article_body ever needing to
+        # drop a line or sentence-cut.
+        body = _format_article_body(body, max_chars=240)
     return title, body, cost, source
 
 
@@ -1352,11 +1366,12 @@ _FLASH_NEWS_PREFIX = "Flash News: "
 _SENTENCE_SPLIT_RX = re.compile(r"(?<=[.!?…])\s+(?=[A-Z0-9🚨📈📉💰⚠🛢🪙🔥💥💸🟢🔴⚡])")
 
 
-def _format_article_body(body: str, max_chars: int = 270) -> str:
-    # The writer LLM ignores soft "3-4 tight lines" prompt rules — it returns a
-    # dense single paragraph. We deterministically reshape into 3-4 line-broken
-    # sentences so the post renders as catchy beats on every platform, drop a
-    # duplicate "Flash News:" lead if the model added one, then prepend ours.
+def _format_article_body(body: str, max_chars: int = 240) -> str:
+    # The writer LLM ignores soft "3 tight lines" prompt rules — it sometimes
+    # returns a dense single paragraph. We deterministically reshape into 3-4
+    # line-broken sentences so the post renders as catchy beats on every
+    # platform, drop a duplicate "Flash News:" lead if the model added one,
+    # then prepend ours.
     #
     # Empty/degenerate bodies raise instead of returning a bare "Flash News:"
     # prefix — we'd rather fail the run loudly than have Substack ship an
@@ -1378,18 +1393,39 @@ def _format_article_body(body: str, max_chars: int = 270) -> str:
 
     body_budget = max_chars - len(_FLASH_NEWS_PREFIX)
     # Drop trailing lines until we fit budget, but always keep the lead
-    # sentence — if it alone overflows, the word-cut block below handles it.
-    # Earlier this loop popped the lead too, leaving raw_lines=[] and shipping
-    # a bare "Flash News:" to Substack.
+    # sentence — if it alone overflows, the sentence-cut block below handles
+    # it. Earlier this loop popped the lead too, leaving raw_lines=[] and
+    # shipping a bare "Flash News:" to Substack.
     while len(raw_lines) > 1 and len("\n".join(raw_lines)) > body_budget:
         raw_lines.pop()
-    # Single very-long lead: word-cut at the last space within budget.
+    # Single very-long lead: cut at the last sentence terminator within
+    # budget — never mid-word with "…". A "…" makes the post look
+    # truncated on X / Substack; cutting at "." / "!" / "?" makes it look
+    # finished, even if shorter than intended. If no terminator exists
+    # within budget, fall back to a word-boundary cut and append a
+    # period instead of an ellipsis.
     if raw_lines and len(raw_lines[0]) > body_budget:
         only = raw_lines[0]
-        cut = only.rfind(" ", 0, body_budget - 1)
-        if cut < body_budget // 2:
-            cut = body_budget - 1
-        raw_lines = [only[:cut].rstrip(" ,;:.\n") + "…"]
+        # Search for the last sentence terminator in budget.
+        terminator_idx = -1
+        for i in range(min(body_budget, len(only)) - 1, body_budget // 3, -1):
+            if only[i] in ".!?":
+                terminator_idx = i
+                break
+        if terminator_idx >= 0:
+            raw_lines = [only[: terminator_idx + 1].rstrip()]
+        else:
+            # No terminator reachable — word-cut and append a period so it
+            # reads as a complete thought rather than a truncated one.
+            cut = only.rfind(" ", 0, body_budget - 1)
+            if cut < body_budget // 2:
+                cut = body_budget - 1
+            cut_text = only[:cut].rstrip(" ,;:—–-\n")
+            # Strip trailing punctuation we don't want a period to follow
+            # (commas etc. would create ",." sequences).
+            if cut_text and cut_text[-1] not in ".!?":
+                cut_text += "."
+            raw_lines = [cut_text]
     if not raw_lines:
         raise RuntimeError(
             "article body collapsed to nothing after reshape — refusing to ship "
