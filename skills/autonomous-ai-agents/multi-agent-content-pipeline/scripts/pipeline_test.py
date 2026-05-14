@@ -2578,6 +2578,7 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
     from concurrent.futures import ThreadPoolExecutor
 
     media_ids: list[str] = []
+    publer_upload_skip_reason = ""
     if piece.video and piece.video.local_path:
         # Video pieces (SHORT_VIDEO_AVATAR, LONG_VIDEO): the video IS the
         # content. A failed upload after retries kills the run — don't ship
@@ -2592,22 +2593,33 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
                         pool.map(lambda img: _publer_upload(img.local_path, "image/png"), images_with_path)
                     )
             except RuntimeError as upload_err:
-                # CAROUSEL: the slides ARE the content — re-raise so the run
-                # fails loudly and the next cron tick retries fresh.
-                # ARTICLE / LONG_ARTICLE: image is decoration. A persistent
-                # Publer 429 used to lose the entire post (be29081f6c6e Nebius
-                # 2026-05-14: 1661c body + Notion archive thrown away because
-                # one upload returned 429). Ship text-only instead — Substack
-                # gets the post + Twitter / LI / FB get the body without an
-                # image. The Notion archive still shows the generated image so
-                # we can manually re-attach if needed.
+                # CAROUSEL: the slides ARE the content — re-raise.
                 if piece.content_type == ContentType.CAROUSEL:
                     raise
-                log.warning(
-                    f"Publer media upload failed after retries — shipping "
-                    f"text-only for {piece.content_type.value}: {upload_err}"
-                )
-                media_ids = []
+                # LONG_ARTICLE: the image is the visual hook. Shipping a bare
+                # 2k-char tweet with no media looks broken (verified on the
+                # 2026-05-14 BoE stablecoin run, post 6a062af6d7e0f028af0ecffe:
+                # type=status, media=0, len=2200 — user pushed back). Skip
+                # the Publer fan-out entirely so Twitter / IG / LI / FB don't
+                # ship the no-image version; Substack still publishes inline
+                # at the end of this function (separate API path). Next 2h
+                # slot retries with a fresh upload.
+                if piece.content_type == ContentType.LONG_ARTICLE:
+                    publer_upload_skip_reason = f"Publer image upload 429'd after retries: {upload_err}"
+                    log.warning(
+                        f"Publer image upload failed for LONG_ARTICLE — skipping "
+                        f"Publer fan-out, Substack will still publish. err={upload_err}"
+                    )
+                    media_ids = []
+                else:
+                    # ARTICLE (short-form / Flash News): body is the value,
+                    # image is decoration. Ship text-only rather than lose the
+                    # whole post — that was the 2026-05-14 Nebius regression.
+                    log.warning(
+                        f"Publer media upload failed after retries — shipping "
+                        f"text-only for {piece.content_type.value}: {upload_err}"
+                    )
+                    media_ids = []
 
     # 2) Schedule per platform — in parallel. Each platform is an independent
     # Publer API call; sequential adds ~5-10s, parallel collapses to ~one round-trip.
@@ -2621,6 +2633,10 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
             # ignores the "scheduled" slot until the inline handler writes
             # the resolved URL directly into publer_job_ids["substack_url"].
             return platform, ""
+        if publer_upload_skip_reason:
+            # LONG_ARTICLE upload 429'd — fail-fast every Publer platform with
+            # a clear marker so the email + watcher reflect the real cause.
+            return platform, f"FAILED: {publer_upload_skip_reason}"
         account = PUBLER_ACCOUNTS.get(platform)
         if not account:
             log.warning(f"no PUBLER_{platform.upper()}_ID configured -- skipping {platform}")
