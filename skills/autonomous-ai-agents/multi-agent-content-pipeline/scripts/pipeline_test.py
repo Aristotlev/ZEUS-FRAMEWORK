@@ -2512,7 +2512,23 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
         if not text:
             log.warning(f"empty body for {platform} -- skipping")
             return platform, ""
-        ptype = ("reel" if platform == "instagram" else "video") if piece.video else "photo"
+        # Publer post type derivation:
+        #   - video present  -> "video" (or "reel" on Instagram)
+        #   - image(s) only  -> "photo"
+        #   - no media       -> "status" (text-only)
+        # The text-only case matters for ARTICLE/Flash-News: sending
+        # type="photo" with an empty media array makes Publer accept the
+        # schedule (returns 200 + job_id, /job_status reports "complete")
+        # but silently drop the post — no entry in any state bucket. Switched
+        # to "status" 2026-05-14 after 4 ARTICLE Twitter runs (07:15/30/46,
+        # 08:16 UTC) vanished from Publer entirely while LONG_ARTICLE posts
+        # the same day landed normally.
+        if piece.video:
+            ptype = "reel" if platform == "instagram" else "video"
+        elif platform_media:
+            ptype = "photo"
+        else:
+            ptype = "status"
         try:
             jid = _publer_schedule(platform, account, ptype, text, platform_media)
             log.info(f"  -> {platform} scheduled ({len(platform_media)} media), job_id={jid}")
