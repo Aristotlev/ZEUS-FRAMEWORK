@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 from typing import Optional
 
 import requests
@@ -271,12 +272,25 @@ def publish_post(
     return f"{_publication_url()}/p/{post_id}"
 
 
+_NODE_MODULES_PATH = "/opt/hermes/node_modules"
+_NOTE_BROWSER_SCRIPT = os.path.join(os.path.dirname(__file__), "substack_note_browser.js")
+
+
 def publish_note(body: str) -> str:
-    """Publish a Substack Note (short-form cross-post). Returns the note URL.
+    """Publish a Substack Note via headless Chromium. Returns the note URL.
 
     Notes are the Substack equivalent of a tweet — single-paragraph short
     text, no title, no subtitle. The pipeline routes ContentType.ARTICLE here
     because its body is already short-form (<480 chars).
+
+    Why a browser and not `requests`: as of 2026-05-14 the
+    /api/v1/comment/feed POST is gated by Cloudflare bot-fight when called
+    from datacenter IPs — we'd get a generic CF 403 HTML page back with a
+    valid substack.sid. Routing through Playwright (Node side, already in the
+    image) lets the request ride a real Chromium TLS fingerprint and inherit
+    cf_clearance/__cf_bm from a warm-up navigation, which CF allows. Other
+    Substack endpoints (drafts, publication users, /api/v1/notes GET) still
+    work over plain requests and are left on the requests path.
     """
     text = (body or "").strip()
     if not text:
@@ -288,22 +302,52 @@ def publish_note(body: str) -> str:
     paragraphs = [p.strip() for p in re.split(r"\n+", text) if p.strip()]
     if not paragraphs:
         paragraphs = [text]
-    payload = {
-        "bodyJson": {
-            "type": "doc",
-            "content": [
-                {
-                    "type": "paragraph",
-                    "content": [{"type": "text", "text": p}],
-                }
-                for p in paragraphs
-            ],
-        },
-        "tabId": "for-you",
-        "surface": "feed",
-    }
-    res = _request("POST", "/api/v1/comment/feed", json_body=payload)
 
+    stdin_payload = json.dumps({
+        "publicationUrl": _publication_url(),
+        "sid": _cookie(),
+        "paragraphs": paragraphs,
+    })
+
+    env = {**os.environ, "NODE_PATH": _NODE_MODULES_PATH}
+    try:
+        proc = subprocess.run(
+            ["node", _NOTE_BROWSER_SCRIPT],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        raise SubstackError("substack note publish timed out after 90s in headless browser")
+    except FileNotFoundError:
+        raise SubstackError("node binary not found — required for Substack notes browser path")
+
+    if proc.returncode != 0:
+        raise SubstackError(
+            f"substack_note_browser.js exited rc={proc.returncode}: {proc.stderr[:500]}"
+        )
+    try:
+        result = json.loads(proc.stdout)
+    except ValueError:
+        raise SubstackError(f"could not parse browser output: {proc.stdout[:300]}")
+
+    status = result.get("status", 0)
+    body_data = result.get("body")
+
+    if status in (401, 403):
+        raise SubstackAuthError(
+            f"Substack {status} via headless browser — likely substack.sid "
+            f"expired or CF re-tightened: {str(body_data)[:200]}"
+        )
+    if status >= 400:
+        raise SubstackError(
+            f"Substack note POST failed {status} via headless browser: "
+            f"{str(body_data)[:300]}"
+        )
+
+    res = body_data if isinstance(body_data, dict) else {}
     comment = res.get("comment") if isinstance(res, dict) else None
     note_id = res.get("id") or ((comment or {}).get("id"))
     # Prefer any canonical URL the API hands back.
