@@ -99,6 +99,14 @@ PUBLER_WORKSPACE = os.getenv("PUBLER_WORKSPACE_ID", "")
 # terminal-failed and the user gets the email so they can fix the root
 # cause manually.
 MAX_PUBLISH_RETRIES = 3
+# PENDING_UPLOAD retry cap (LONG_ARTICLE only). When pipeline_test.publish()
+# exhausts its in-process ~5min upload retry budget, every Publer platform
+# is marked "FAILED: PENDING_UPLOAD: ...". This prefix is a transient signal
+# — Publer's /media endpoint hit a workspace-wide 429 window. Retry every
+# tick (2 min) up to this cap so the post eventually ships with its image
+# once Publer recovers. 30 ticks × 2min ≈ 1hr — covers normal Publer 429
+# windows. Past that the run goes terminal-failed (user emailed).
+PENDING_UPLOAD_MAX_RETRIES = 30
 
 # TikTok permalink-callback grace period. Publer marks TikTok posts as
 # state=published the moment TikTok accepts them, but the live URL only
@@ -367,10 +375,32 @@ def _resolve_one(piece: ContentPiece, post_id_cache: dict) -> dict:
     return states
 
 
+def _has_pending_upload(piece: ContentPiece) -> bool:
+    """True if any Publer platform's job_id is the PENDING_UPLOAD transient
+    marker emitted by pipeline_test.publish() when /media 429'd. Drives both
+    immediate-retry (no 24h deadline wait) and the higher retry cap in
+    _retry_publish.
+    """
+    for plat in piece.target_platforms:
+        if plat == "substack":
+            continue
+        jid = str(piece.publer_job_ids.get(plat, ""))
+        if "PENDING_UPLOAD:" in jid:
+            return True
+    return False
+
+
 def _final_status(states: dict[str, str], piece: ContentPiece, past_deadline: bool) -> str:
     confirmed = [p for p, s in states.items() if s == "live"]
     failed = [p for p, s in states.items() if s == "failed"]
     pending = [p for p, s in states.items() if s == "pending"]
+    # PENDING_UPLOAD: Publer /media 429'd on the original publish run so every
+    # Publer platform is marked FAILED with a "PENDING_UPLOAD:" prefix. These
+    # are transient — Substack may already be live. Skip the 24h past_deadline
+    # gate and return "failed" immediately so _retry_publish re-runs publish()
+    # this tick. Higher retry cap (PENDING_UPLOAD_MAX_RETRIES) applies there.
+    if _has_pending_upload(piece) and not confirmed and not pending:
+        return "failed"
     # 'skipped' platforms — never attempted (no Publer account ID) — and
     # 'dropped' platforms (TikTok grace expired without a permalink) are
     # ignored when judging status. A run that landed on twitter+linkedin
@@ -415,11 +445,24 @@ def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:
       - any platform has a live post matching this snippet on Publer
       - pipeline_test.publish() raises (e.g. PUBLER_API_KEY suddenly unset)
     """
-    attempts = int(meta.get("retry_count") or 0)
-    if attempts >= MAX_PUBLISH_RETRIES:
+    # Distinguish PENDING_UPLOAD (transient Publer /media 429 — retry up to
+    # PENDING_UPLOAD_MAX_RETRIES, ~1hr at 2-min ticks) from real publish
+    # failures (schedule errors / misconfig — MAX_PUBLISH_RETRIES = 3 to
+    # surface permanent issues to the user via the failure email). Separate
+    # counter keys so a Publer outage doesn't burn the 3-attempt cap meant
+    # for misconfig detection.
+    pending_upload = _has_pending_upload(piece)
+    if pending_upload:
+        counter_key = "upload_retry_count"
+        cap = PENDING_UPLOAD_MAX_RETRIES
+    else:
+        counter_key = "retry_count"
+        cap = MAX_PUBLISH_RETRIES
+    attempts = int(meta.get(counter_key) or 0)
+    if attempts >= cap:
         log.warning(
-            f"  run={piece.run_id} all platforms failed and retry cap "
-            f"({MAX_PUBLISH_RETRIES}) reached -- giving up"
+            f"  run={piece.run_id} {'PENDING_UPLOAD' if pending_upload else 'all platforms failed'} "
+            f"and retry cap ({cap}) reached -- giving up"
         )
         return False
     # Idempotency guard: distinguish "Publer rejected the schedule"
@@ -473,12 +516,22 @@ def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:
         )
         return False
     log.warning(
-        f"  run={piece.run_id} all platforms failed -- retry "
-        f"#{attempts + 1}/{MAX_PUBLISH_RETRIES} (reusing local media)"
+        f"  run={piece.run_id} {'PENDING_UPLOAD retry' if pending_upload else 'all platforms failed -- retry'} "
+        f"#{attempts + 1}/{cap} (reusing local media)"
     )
     # Clear stale per-platform job ids + URL markers so publish() schedules
     # fresh jobs and the next watcher pass starts URL resolution from clean.
+    # EXCEPT substack: when PENDING_UPLOAD is the cause, Substack already
+    # shipped on the original run (it doesn't go through Publer /media),
+    # and re-running _publish_substack would create a duplicate post.
+    # publish_substack's idempotency guard also checks for the http-prefixed
+    # substack_url, but preserving the marker here is belt-and-braces.
+    substack_state = {
+        k: v for k, v in piece.publer_job_ids.items()
+        if k.startswith("substack")
+    }
     piece.publer_job_ids = {}
+    piece.publer_job_ids.update(substack_state)
     sys.path.insert(0, str(SCRIPT_DIR))
     try:
         import pipeline_test  # lazy: avoid circular cost at module load
@@ -487,11 +540,11 @@ def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:
         log.error(f"  retry failed: {e} -- finalizing as failed")
         return False
     # Stamp the queue row so the next pass sees the new state. Bumping
-    # retry_count here (rather than in enqueue) keeps retries observable
+    # the counter here (rather than in enqueue) keeps retries observable
     # in zeus_publish_done.jsonl after the run eventually resolves.
     row["piece"]["publer_job_ids"] = dict(piece.publer_job_ids)
     row["piece"]["status"] = piece.status
-    row["retry_count"] = attempts + 1
+    row[counter_key] = attempts + 1
     return True
 
 

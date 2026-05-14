@@ -2139,16 +2139,23 @@ def _publer_note_429(resp=None) -> None:
 # 3 attempts with widening backoff (0s → 30s → 90s, ~2 min total). Tuned to
 # survive the Publer workspace-wide 429 windows seen 2026-05-13/14 (where a
 # burst of upload attempts from the long-article + breaking-news pipelines
-# tripped the global limit). Beyond 3 attempts we stop and let the caller
-# decide whether to fall back to text-only — sitting here longer than 2 min
-# starves the run's overall budget and risks the entrypoint SIGKILL.
+# tripped the global limit). Beyond N attempts we stop and let the caller
+# decide whether to fall back to text-only / persist for watcher retry.
+#
+# Default schedule (~2 min total) for ARTICLE / breaking-news / video pieces:
+# short bursts that re-fire on the next cron tick anyway.
 _PUBLER_UPLOAD_RETRY_DELAYS_S = [30, 90]
+# LONG_ARTICLE schedule (~5 min total): image is non-negotiable, slot fires
+# every 2h so we can afford to wait longer in-process before persisting the
+# piece for out-of-process retry via the publish watcher.
+_PUBLER_UPLOAD_RETRY_DELAYS_S_LONG_ARTICLE = [30, 60, 90, 120]
 
 
-def _publer_upload(local_path: str, mime: str) -> str:
+def _publer_upload(local_path: str, mime: str, retry_delays: list[int] | None = None) -> str:
+    delays = retry_delays if retry_delays is not None else _PUBLER_UPLOAD_RETRY_DELAYS_S
     last_status = 0
     last_body = ""
-    for attempt in range(len(_PUBLER_UPLOAD_RETRY_DELAYS_S) + 1):
+    for attempt in range(len(delays) + 1):
         with open(local_path, "rb") as fh:
             r = requests.post(
                 f"{PUBLER_BASE}/media",
@@ -2164,13 +2171,12 @@ def _publer_upload(local_path: str, mime: str) -> str:
         # are deterministic failures — retrying won't help and just wastes the
         # workspace's already-thin Publer budget.
         is_transient = r.status_code == 429 or r.status_code >= 500
-        if not is_transient or attempt >= len(_PUBLER_UPLOAD_RETRY_DELAYS_S):
+        if not is_transient or attempt >= len(delays):
             break
-        delay = _PUBLER_UPLOAD_RETRY_DELAYS_S[attempt]
+        delay = delays[attempt]
         log.warning(
             f"Publer media upload returned {r.status_code} "
-            f"(attempt {attempt + 1}/{len(_PUBLER_UPLOAD_RETRY_DELAYS_S) + 1}) — "
-            f"retrying in {delay}s"
+            f"(attempt {attempt + 1}/{len(delays) + 1}) — retrying in {delay}s"
         )
         time.sleep(delay)
     raise RuntimeError(f"Publer media upload failed {last_status}: {last_body}")
@@ -2501,6 +2507,15 @@ def _publish_substack(piece: ContentPiece) -> None:
             "  substack: SUBSTACK_SID/SUBSTACK_PUBLICATION_URL not set — skipping"
         )
         return
+    # Idempotency: when publish_watcher._retry_publish re-invokes publish()
+    # (e.g. PENDING_UPLOAD case where Publer 429'd but Substack already shipped),
+    # this function would create a duplicate Substack post without the guard.
+    # The retry path preserves piece.publer_job_ids["substack_url"] for exactly
+    # this check.
+    _existing_substack_url = str(piece.publer_job_ids.get("substack_url", ""))
+    if _existing_substack_url.startswith("http"):
+        log.info(f"  substack already posted ({_existing_substack_url}) — skipping re-publish")
+        return
 
     try:
         if piece.content_type == ContentType.ARTICLE:
@@ -2577,38 +2592,51 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
     # preserves input order so slide ordering is not disturbed.
     from concurrent.futures import ThreadPoolExecutor
 
+    # Per-content-type upload retry profile. LONG_ARTICLE waits longer in-process
+    # because the image is mandatory; ARTICLE / breaking-news stays short because
+    # the next cron tick re-fires within minutes anyway.
+    if piece.content_type == ContentType.LONG_ARTICLE:
+        upload_retry_delays = _PUBLER_UPLOAD_RETRY_DELAYS_S_LONG_ARTICLE
+    else:
+        upload_retry_delays = _PUBLER_UPLOAD_RETRY_DELAYS_S
+
     media_ids: list[str] = []
     publer_upload_skip_reason = ""
     if piece.video and piece.video.local_path:
         # Video pieces (SHORT_VIDEO_AVATAR, LONG_VIDEO): the video IS the
         # content. A failed upload after retries kills the run — don't ship
         # an "audio-less" / text-only version.
-        media_ids = [_publer_upload(piece.video.local_path, "video/mp4")]
+        media_ids = [_publer_upload(piece.video.local_path, "video/mp4", upload_retry_delays)]
     else:
         images_with_path = [img for img in piece.images if img.local_path]
         if images_with_path:
             try:
                 with ThreadPoolExecutor(max_workers=min(8, len(images_with_path))) as pool:
                     media_ids = list(
-                        pool.map(lambda img: _publer_upload(img.local_path, "image/png"), images_with_path)
+                        pool.map(
+                            lambda img: _publer_upload(img.local_path, "image/png", upload_retry_delays),
+                            images_with_path,
+                        )
                     )
             except RuntimeError as upload_err:
                 # CAROUSEL: the slides ARE the content — re-raise.
                 if piece.content_type == ContentType.CAROUSEL:
                     raise
-                # LONG_ARTICLE: the image is the visual hook. Shipping a bare
-                # 2k-char tweet with no media looks broken (verified on the
-                # 2026-05-14 BoE stablecoin run, post 6a062af6d7e0f028af0ecffe:
-                # type=status, media=0, len=2200 — user pushed back). Skip
-                # the Publer fan-out entirely so Twitter / IG / LI / FB don't
-                # ship the no-image version; Substack still publishes inline
-                # at the end of this function (separate API path). Next 2h
-                # slot retries with a fresh upload.
+                # LONG_ARTICLE: image is mandatory (2026-05-14 BoE run shipped
+                # bare 2k-char tweet, user pushed back). After the in-process
+                # ~5min retry, persist the piece for the watcher to retry on
+                # its 2-min tick (up to ~1hr). Marker prefix "PENDING_UPLOAD:"
+                # is what publish_watcher._retry_publish keys off to:
+                #   - bypass the standard 24h past-deadline gate (retry NOW)
+                #   - use a higher retry cap (PENDING_UPLOAD_MAX_RETRIES, ~1hr)
+                # Substack still publishes inline below so it ships immediately
+                # even while Publer keeps 429'ing.
                 if piece.content_type == ContentType.LONG_ARTICLE:
-                    publer_upload_skip_reason = f"Publer image upload 429'd after retries: {upload_err}"
+                    publer_upload_skip_reason = f"PENDING_UPLOAD: Publer media 429'd after in-process retries — watcher will retry: {upload_err}"
                     log.warning(
-                        f"Publer image upload failed for LONG_ARTICLE — skipping "
-                        f"Publer fan-out, Substack will still publish. err={upload_err}"
+                        f"Publer image upload exhausted in-process retry budget for "
+                        f"LONG_ARTICLE — marking platforms PENDING_UPLOAD, watcher "
+                        f"will retry every 2min until Publer recovers. err={upload_err}"
                     )
                     media_ids = []
                 else:
