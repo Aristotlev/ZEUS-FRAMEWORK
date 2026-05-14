@@ -52,6 +52,14 @@ services:
     restart: unless-stopped
     stdin_open: false
     tty: false
+    # `docker restart` (auto-deploy on every push to main) sends SIGTERM
+    # with a 10s grace by default, then SIGKILL. That window is too short:
+    # an article-slot cron run takes 2-5min, and a SIGKILL mid-flight
+    # leaves orphaned Publer schedules + half-archived Notion rows that
+    # the watcher then has to reconcile. 5min covers every pipeline type
+    # we currently run (long_article ≤4min, breaking_news ≤90s, carousel
+    # ≤3min); deploys still complete in <6min end-to-end.
+    stop_grace_period: 300s
     # Load all secrets from .env.prod directly into the container env. The
     # `--env-file` compose flag only fuels ${VAR} substitution; without this
     # env_file directive only OPENROUTER_API_KEY (the one explicitly listed
