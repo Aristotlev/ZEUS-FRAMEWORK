@@ -164,10 +164,22 @@ terminal:
   # the allowlist _publish_substack() reads empty strings and silently skips,
   # so substack shows up as 'skipped' in the watcher and the run finalises
   # 'posted' without ever hitting Substack.
+  # ZEUS_TWITTER_TIER + the three knob overrides: stripping these forces
+  # lib/platforms.py to fall back to free-tier defaults (TWITTER_LIMIT=280).
+  # caption_for(piece, "twitter") then truncates every LONG_ARTICLE body to
+  # 278c with "…" BEFORE _publer_schedule sees the text, which silently
+  # disables the len(text)>280 → details.long_post path. Symptom seen in
+  # prod 2026-05-14 on the 10:00 UTC cron: body=1500c+ generated, post on X
+  # came back text_len=278 truncated despite container env having
+  # ZEUS_TWITTER_TIER=premium.
   env_passthrough:
     - TAVILY_API_KEY
     - SUBSTACK_SID
     - SUBSTACK_PUBLICATION_URL
+    - ZEUS_TWITTER_TIER
+    - ZEUS_TWITTER_LIMIT
+    - ZEUS_TWITTER_THREAD_TRIGGER
+    - ZEUS_TWITTER_TWEET_BUDGET
 
 memory:
   memory_enabled: true
