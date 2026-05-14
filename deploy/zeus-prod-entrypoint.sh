@@ -41,6 +41,33 @@ if [ "$(id -u)" = "0" ]; then
     if [ "$(stat -c %u "$HERMES_INSTALL" 2>/dev/null)" != "$actual_uid" ]; then
         chown -R hermes:hermes "$HERMES_INSTALL" 2>/dev/null || true
     fi
+
+    # Run setup_content_cron.py NOW, as hermes via gosu, before we hand off
+    # to the hermes-phase bootstrap. The hermes-phase used to invoke this
+    # script itself, but the upstream Hermes bootstrap can re-elevate
+    # between gosu and the python call — when that happens jobs.json lands
+    # root:600 and the gateway (running as hermes) cannot read it →
+    # every cron silently dies. Doing it from the root phase via an
+    # explicit gosu hermes pins the writer uid deterministically. A marker
+    # file tells the hermes-phase block downstream to skip its duplicate
+    # invocation.
+    SETUP_CRON_PRE="$ZEUS_DIR/scripts/setup_content_cron.py"
+    if [ -f "$SETUP_CRON_PRE" ]; then
+        echo "[zeus-prod] resyncing zeus-content-* cron jobs (pre-gosu, as hermes)"
+        gosu hermes "$HERMES_INSTALL/.venv/bin/python" "$SETUP_CRON_PRE" \
+            2>&1 | sed 's/^/[zeus-prod cron-sync] /' || \
+            echo "[zeus-prod] WARN: setup_content_cron.py exited non-zero"
+        gosu hermes touch "$HERMES_HOME/.cron-resynced-this-boot" 2>/dev/null || true
+    fi
+    # Belt-and-braces: even if the gosu-hermes invocation above ended up
+    # writing jobs.json as something other than hermes (e.g. an in-process
+    # re-elevation we don't know about), re-assert ownership here while we
+    # still have root.
+    if [ -f "$HERMES_HOME/cron/jobs.json" ]; then
+        chown hermes:hermes "$HERMES_HOME/cron/jobs.json" 2>/dev/null || true
+        chmod 644 "$HERMES_HOME/cron/jobs.json" 2>/dev/null || true
+    fi
+
     exec gosu hermes "$0" "$@"
 fi
 
@@ -227,7 +254,10 @@ wait_for "${POSTGRES_HOST:-postgres}" "${POSTGRES_PORT:-5432}" "PostgreSQL"
 # changes, prompt tweaks, adding/removing slots) take effect on the next
 # `git pull && docker restart zeus-agent` without a separate SSH step.
 SETUP_CRON="$ZEUS_DIR/scripts/setup_content_cron.py"
-if [ -f "$SETUP_CRON" ]; then
+if [ -f "$HERMES_HOME/.cron-resynced-this-boot" ]; then
+    rm -f "$HERMES_HOME/.cron-resynced-this-boot" 2>/dev/null || true
+    echo "[zeus-prod] cron resync already done in root phase (as hermes via gosu), skipping"
+elif [ -f "$SETUP_CRON" ]; then
     echo "[zeus-prod] resyncing zeus-content-* cron jobs from setup_content_cron.py"
     "$HERMES_INSTALL/.venv/bin/python" "$SETUP_CRON" \
         2>&1 | sed 's/^/[zeus-prod cron-sync] /' || \
