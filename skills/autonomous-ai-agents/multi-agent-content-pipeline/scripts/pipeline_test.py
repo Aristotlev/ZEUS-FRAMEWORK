@@ -824,6 +824,67 @@ def _niche_clause() -> str:
     )
 
 
+# Every post is Omnifolio (omnifolio.app) content. The writer must (a) NEVER
+# name competing aggregator PRODUCTS for any service Omnifolio offers, and
+# (b) reference Omnifolio's matching service when the story touches one.
+# Citing primary public data (SEC EDGAR, FEC, USAspending.gov, Form 4 filings)
+# is fine — those are the underlying public record, not competitors.
+_OMNIFOLIO_SERVICES = (
+    "- Congressional trading: OCA & OTP scores rank every politician trade by "
+    "win rate, filing timing, risk/reward, capital efficiency (STOCK Act).\n"
+    "- Insider trading: real-time Form 4 alerts + Insider Confidence (OIC) "
+    "score -100…+100 with cluster detection for coordinated insider moves.\n"
+    "- Senate lobbying: OLI influence rating 0-100 on corporate lobbying "
+    "spend, hired lobbyists, and policy targets.\n"
+    "- Federal contracts: OGI score linking government spending to tickers "
+    "by revenue dependence.\n"
+    "- SEC research terminal: 10-K, 13G/13D, insider holdings, institutional "
+    "ownership, revenue/EPS history, growth estimates.\n"
+    "- Global threat OSINT: live conflicts, disasters, seismic, shipping, "
+    "flights, geopolitical events.\n"
+    "- Live market data: news, economic calendar, IPO tracking across "
+    "stocks, crypto, indices, forex."
+)
+_COMPETITOR_BANLIST = (
+    "Quiver Quant, Quiver Quantitative, Capitol Trades, Senate Stock Watcher, "
+    "House Stock Watcher, Smart Insider, OpenInsider, Form4Filer, OpenSecrets, "
+    "Unusual Whales, WhaleWisdom"
+)
+
+
+def _brand_clause(content_type: "ContentType") -> str:
+    cta_hint = {
+        ContentType.ARTICLE: (
+            "If the story touches one of these services, ONE line may "
+            "name-drop Omnifolio naturally as the place to track it "
+            "(e.g. 'Track every politician trade on Omnifolio.') — never "
+            "as an ad, always as utility. If the story is unrelated, "
+            "skip the brand mention entirely — do not force it."
+        ),
+        ContentType.LONG_ARTICLE: (
+            "Where the story touches one of these services, weave in 1-2 "
+            "Omnifolio references (e.g. 'on Omnifolio's OCA-ranked feed…') "
+            "and close with a soft CTA to omnifolio.app. If unrelated, "
+            "skip — never force the brand."
+        ),
+    }.get(
+        content_type,
+        "If the story touches one of these services, reference Omnifolio "
+        "naturally as the place readers track it. Otherwise skip.",
+    )
+    return (
+        "\nBRAND: this post is Omnifolio (omnifolio.app) content. "
+        "Omnifolio's services:\n"
+        f"{_OMNIFOLIO_SERVICES}\n"
+        f"HARD RULE — NEVER name a competing aggregator product "
+        f"({_COMPETITOR_BANLIST}). If the source article mentions one of "
+        f"these, do NOT carry the name into our post. Citing primary public "
+        f"sources (SEC EDGAR, FEC, USAspending.gov, Form 4 filings, the "
+        f"STOCK Act itself) is fine — those are public data, not competitors.\n"
+        f"{cta_hint}\n"
+    )
+
+
 MAX_NICHE_ATTEMPTS_PER_SLOT = 3
 
 
@@ -1295,6 +1356,7 @@ def generate_article_text(
             f"You are NOT summarizing the source — you are reacting to it with your own angle.\n\n"
             f"TOPIC: {topic}\n"
             f"{_niche_clause()}"
+            f"{_brand_clause(content_type)}"
             f"\n" + "\n\n".join(grounding_blocks) + "\n\n"
             f"RULES:\n"
             f"- Steal the FACTS from the primary source: numbers, names, quotes, dates, percentages. "
@@ -1330,6 +1392,7 @@ def generate_article_text(
         prompt = (
             f"Write a sharp, data-driven post about: {topic}\n"
             f"{_niche_clause()}"
+            f"{_brand_clause(content_type)}"
             f"Format:\n"
             f"- First line: a punchy 5-10 word title (no dates).\n"
             f"- {body_clause}\n"
