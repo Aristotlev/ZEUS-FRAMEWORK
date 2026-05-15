@@ -225,13 +225,18 @@ if [ -d "$ZEUS_DIR/memory" ]; then
     done
 fi
 
-# Skills sync
+# Skills sync. Force-overwrite (no `-n`) so a fresh `git pull` of /opt/zeus
+# actually propagates into /opt/hermes/skills and /opt/data/skills. Without
+# the overwrite, the LLM-driven cron jobs (which resolve relative paths like
+# `skills/.../pipeline_test.py` against the gateway's cwd = $HERMES_HOME)
+# kept running the first-boot copy of every script — auto-deploy updated
+# /opt/zeus but breaking-news / article runs silently used stale code.
 if [ -d "$ZEUS_DIR/skills" ]; then
-    cp -rn "$ZEUS_DIR/skills/"* "$HERMES_INSTALL/skills/" 2>/dev/null || true
+    cp -rf "$ZEUS_DIR/skills/." "$HERMES_INSTALL/skills/" 2>/dev/null || true
 fi
 if [ -f "$HERMES_INSTALL/tools/skills_sync.py" ]; then
     python3 "$HERMES_INSTALL/tools/skills_sync.py" 2>/dev/null || \
-        cp -rn "$HERMES_INSTALL/skills/"* "$HERMES_HOME/skills/" 2>/dev/null || true
+        cp -rf "$HERMES_INSTALL/skills/." "$HERMES_HOME/skills/" 2>/dev/null || true
 fi
 
 # Soft deps for the Notion ideas ingester. pypdf is needed when users drop
