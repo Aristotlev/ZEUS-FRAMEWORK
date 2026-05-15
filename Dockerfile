@@ -48,6 +48,10 @@ RUN chown hermes:hermes /opt/hermes
 USER hermes
 RUN uv venv /opt/hermes/.venv && \
     uv pip install --no-cache-dir --python /opt/hermes/.venv/bin/python ".[all]" 2>/dev/null || true
+# EVENT_CLIP pipeline needs yt-dlp (apt's package is months out of date and
+# breaks against YouTube's regular signature-cipher rotations). Pin from pip
+# so the venv binary at /opt/hermes/.venv/bin/yt-dlp is current.
+RUN uv pip install --no-cache-dir --python /opt/hermes/.venv/bin/python yt-dlp
 USER root
 
 # Hermes source (cache-bust only invalidates the install step below, not npm)

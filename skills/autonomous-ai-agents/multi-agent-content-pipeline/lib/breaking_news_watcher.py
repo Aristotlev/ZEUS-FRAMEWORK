@@ -530,6 +530,24 @@ def _run_locked(
             )
             continue
 
+        # EVENT_CLIP-first routing: if the headline matches a known speaker /
+        # entity with an official YouTube channel AND that channel has a
+        # fresh upload within the lookback window, ship the event clip
+        # instead of the text-only ARTICLE. Falls through to ARTICLE on any
+        # failure (no fresh upload, Gemini SKIP, source too long, etc.).
+        # User mandate (2026-05-15): clip-only — when a clip exists, suppress
+        # the ARTICLE leg for that story.
+        event_clip_shipped = _try_event_clip_for_headline(item)
+        if event_clip_shipped is not None:
+            run_id, status = event_clip_shipped
+            _mark_seen(conn, item["item_id"], item["source"], item["title"], item["url"], item["score"], True)
+            summary["shipped"].append({
+                "title": item["title"], "score": item["score"], "url": item["url"],
+                "run_id": run_id, "pipeline": "event_clip", "status": status,
+            })
+            log.info("event_clip shipped run_id=%s: %s", run_id, item["title"])
+            continue
+
         try:
             piece = run_pipeline(
                 content_type=ContentType.ARTICLE,
@@ -560,6 +578,56 @@ def _run_locked(
 
     conn.close()
     return summary
+
+
+def _try_event_clip_for_headline(item: dict) -> Optional[tuple[str, str]]:
+    """Best-effort EVENT_CLIP shipment for a winning headline.
+
+    Returns (run_id, status) on success, None on any failure so the caller
+    falls through to ARTICLE. Failures are logged but never raised — the
+    ARTICLE leg must always run for headlines without a matching channel.
+    """
+    try:
+        from lib.event_clip import (  # noqa: WPS433
+            candidate_channel_for_headline,
+            list_fresh_uploads,
+            lookback_hours_from_env,
+        )
+    except Exception:
+        return None
+    channel = candidate_channel_for_headline(item.get("title") or "")
+    if not channel:
+        return None
+    try:
+        uploads = list_fresh_uploads(channel, hours_back=lookback_hours_from_env())
+    except Exception as exc:
+        log.warning("event_clip: list_fresh_uploads failed for %s: %s", channel, exc)
+        return None
+    if not uploads:
+        log.info("event_clip: no fresh uploads on %s — falling back to ARTICLE", channel)
+        return None
+    # Highest-likelihood match = newest upload. yt-dlp returns most-recent first.
+    upload = uploads[0]
+    try:
+        from scripts.event_clip_watch import _ship_one_upload  # type: ignore
+    except Exception:
+        # Compatibility shim if the import path resolves differently in prod.
+        _ensure_pipeline_on_path()
+        from event_clip_watch import _ship_one_upload  # type: ignore
+    result = _ship_one_upload(upload, dry_run=False)
+    if not result.get("shipped"):
+        log.info("event_clip: ship failed (%s) — falling back to ARTICLE", result.get("outcome"))
+        return None
+    outcome = result.get("outcome") or ""
+    run_id = ""
+    for tok in outcome.split():
+        if tok.startswith("run_id="):
+            run_id = tok.split("=", 1)[1]
+    status = ""
+    for tok in outcome.split():
+        if tok.startswith("status="):
+            status = tok.split("=", 1)[1]
+    return run_id, status
 
 
 def _ensure_pipeline_on_path() -> None:

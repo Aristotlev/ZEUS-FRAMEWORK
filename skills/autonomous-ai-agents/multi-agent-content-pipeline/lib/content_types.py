@@ -41,6 +41,11 @@ class ContentType(str, Enum):
     # Scaffold-only — orchestrator NotImplementedError until provider picked.
     SHORT_VIDEO_AVATAR = "short_video_avatar"
     LONG_VIDEO_AVATAR = "long_video_avatar"
+    # Real-event soundbite: yt-dlp pulls speech/hearing video from a gov/
+    # official channel allowlist, Gemini 2.5 Flash picks a ≤90s window in
+    # one multimodal call, ffmpeg renders dual-AR (9:16 + 16:9) for
+    # platform-specific fan-out. No synthetic media. See lib/event_clip.py.
+    EVENT_CLIP = "event_clip"
 
 
 class AudioMode(str, Enum):
@@ -74,6 +79,10 @@ PLATFORMS_BY_TYPE: dict[ContentType, list[str]] = {
     # Same dims, same publish flow once the generator lands.
     ContentType.SHORT_VIDEO_AVATAR: ["twitter", "instagram", "linkedin", "tiktok", "youtube", "facebook"],
     ContentType.LONG_VIDEO_AVATAR: ["youtube", "twitter", "linkedin", "reddit"],
+    # EVENT_CLIP fans out to every video-friendly platform plus Substack
+    # for a Post with the landscape embed. Per-platform AR routing happens
+    # in publish() based on piece.video_vertical (when present).
+    ContentType.EVENT_CLIP: ["twitter", "instagram", "linkedin", "tiktok", "youtube", "facebook", "substack"],
 }
 
 
@@ -100,7 +109,16 @@ class ContentPiece:
 
     images: list[GeneratedAsset] = field(default_factory=list)
     video: Optional[GeneratedAsset] = None
+    # EVENT_CLIP carries TWO encoded videos for per-platform AR routing:
+    # `video` holds the 1920x1080 landscape cut (X/LinkedIn/FB/Substack),
+    # `video_vertical` holds the 1080x1920 vertical cut (IG/TikTok/YT
+    # Shorts). publish() picks the right one per platform when both are
+    # present. None of the synthetic-media pipelines populate this.
+    video_vertical: Optional[GeneratedAsset] = None
     audio: Optional[GeneratedAsset] = None
+    # EVENT_CLIP-only: the originating YouTube URL of the soundbite. Lets
+    # the email + Notion archive show source attribution alongside post URLs.
+    source_video_url: str = ""
 
     created_at: datetime = field(default_factory=datetime.utcnow)
     posted_at: Optional[datetime] = None
@@ -226,4 +244,28 @@ class ContentPiece:
                     errors.append(
                         f"Long video avatar must be 1920x1080, got {self.video.width}x{self.video.height}"
                     )
+        elif ct == ContentType.EVENT_CLIP:
+            if not self.video:
+                errors.append("Event clip requires a landscape video asset")
+            else:
+                if self.video.duration_s is not None and self.video.duration_s > 90:
+                    errors.append(
+                        f"Event clip must be ≤90s, got {self.video.duration_s}s"
+                    )
+                if self.video.width and self.video.height:
+                    if (self.video.width, self.video.height) != (1920, 1080):
+                        errors.append(
+                            f"Event clip landscape must be 1920x1080, got {self.video.width}x{self.video.height}"
+                        )
+            if self.video_vertical:
+                vv = self.video_vertical
+                if vv.duration_s is not None and vv.duration_s > 90:
+                    errors.append(
+                        f"Event clip vertical must be ≤90s, got {vv.duration_s}s"
+                    )
+                if vv.width and vv.height:
+                    if (vv.width, vv.height) != (1080, 1920):
+                        errors.append(
+                            f"Event clip vertical must be 1080x1920, got {vv.width}x{vv.height}"
+                        )
         return errors

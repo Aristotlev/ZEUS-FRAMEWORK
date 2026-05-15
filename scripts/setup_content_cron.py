@@ -202,6 +202,24 @@ def _build_jobs(niche: List[str]):
         + HARD_RULES
     )
 
+    event_clip_slot = (
+        "Run ONE event-clip watcher pass. The script polls the gov/official "
+        "YouTube allowlist (Fed, SEC, Treasury, BLS, House FinServ, Senate "
+        "Banking, C-SPAN, IMF, ECB, BOE, BOJ — see lib/event_clip.py for the "
+        "default list), dedups against ~/.hermes/event_clip_seen.db (14-day "
+        "window), and for each unseen fresh upload: yt-dlp downloads it at "
+        "480p, ffmpeg extracts mono mp3 audio, Gemini 2.5 Flash via OpenRouter "
+        "picks the most newsworthy ≤90s window in ONE multimodal call, ffmpeg "
+        "cuts dual-AR clips (1080x1920 vertical + 1920x1080 landscape), and "
+        "the EVENT_CLIP pipeline fans out via Publer (IG/TikTok/YT Shorts get "
+        "vertical, X/LinkedIn/FB get landscape) + Substack Note. Hard caps: "
+        "1 ship/fire, 3/hr, 30/day.\n\n"
+        f"COMMAND (this is the entire task):\n"
+        f"  {PYTHON} {PIPELINE}/event_clip_watch.py\n\n"
+        "On exit 0: report the one-line JSON summary printed to stdout."
+        + HARD_RULES
+    )
+
     breaking_news = (
         "Run ONE breaking-news watcher pass. The script polls MarketWatch, "
         "Investing.com, InvestingLive RSS + Finnhub general news, dedups "
@@ -321,6 +339,16 @@ def _build_jobs(niche: List[str]):
             # planning window.
             "schedule": "0 17 * * 0",
             "prompt": weekly_analytics,
+        },
+        {
+            "name": "zeus-content-event-clip",
+            # Every 30 min. Source supply on gov/official channels averages
+            # 3-8 clip-worthy uploads/day on a normal day, bursting to 15-25
+            # on FOMC/NFP days — so 30-min cadence is plenty. Each ship is
+            # heavier than ARTICLE (yt-dlp + ffmpeg + Gemini audio), so the
+            # cap stays at 1/fire + 3/hr + 30/day until we see real volume.
+            "schedule": "*/30 * * * *",
+            "prompt": event_clip_slot,
         },
         {
             "name": "zeus-content-breaking-news",

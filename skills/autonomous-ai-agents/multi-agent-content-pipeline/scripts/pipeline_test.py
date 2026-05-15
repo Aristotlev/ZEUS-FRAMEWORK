@@ -2585,6 +2585,15 @@ def _publish_substack(piece: ContentPiece) -> None:
                 return
             url = substack_publish_note(piece.body)
             log.info(f"  -> substack note live: {url}")
+        elif piece.content_type == ContentType.EVENT_CLIP:
+            # Note (not Post) for v1 — Substack's video-upload endpoint isn't
+            # wired into lib/substack.py yet. The body is the caption + the
+            # source YouTube URL so readers can watch the full speech/hearing.
+            note_body = (piece.body or "").strip()
+            if piece.source_video_url:
+                note_body = f"{note_body}\n\nFull video: {piece.source_video_url}".strip()
+            url = substack_publish_note(note_body)
+            log.info(f"  -> substack event-clip note live: {url}")
         else:
             # LONG_ARTICLE — full post. Subtitle defaults to topic when the
             # writer didn't produce one (keeps the Substack card preview
@@ -2651,8 +2660,24 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
         upload_retry_delays = _PUBLER_UPLOAD_RETRY_DELAYS_S
 
     media_ids: list[str] = []
+    # EVENT_CLIP carries a 1080x1920 vertical cut alongside the 1920x1080
+    # landscape so IG Reels / TikTok / YT Shorts ship vertical while
+    # X / LinkedIn / FB ship landscape. media_ids_by_orientation maps the
+    # platform-derived choice in _schedule_one to the right uploaded asset.
+    media_ids_by_orientation: dict[str, str] = {}
     publer_upload_skip_reason = ""
-    if piece.video and piece.video.local_path:
+    if (
+        piece.content_type == ContentType.EVENT_CLIP
+        and piece.video and piece.video.local_path
+        and piece.video_vertical and piece.video_vertical.local_path
+    ):
+        landscape_id = _publer_upload(piece.video.local_path, "video/mp4", upload_retry_delays)
+        vertical_id = _publer_upload(piece.video_vertical.local_path, "video/mp4", upload_retry_delays)
+        media_ids_by_orientation = {"landscape": landscape_id, "vertical": vertical_id}
+        # Default media_ids points at the landscape cut for any platform that
+        # doesn't have an explicit orientation routing rule below.
+        media_ids = [landscape_id]
+    elif piece.video and piece.video.local_path:
         # Video pieces (SHORT_VIDEO_AVATAR, LONG_VIDEO): the video IS the
         # content. A failed upload after retries kills the run — don't ship
         # an "audio-less" / text-only version.
@@ -2724,6 +2749,17 @@ def publish(piece: ContentPiece, *, wait_for_live: bool = False) -> None:
         if platform == "twitter" and len(media_ids) > 4:
             platform_media = media_ids[:4]
             log.info(f"  twitter: trimming {len(media_ids)} slides to 4 (Twitter cap)")
+        elif media_ids_by_orientation:
+            # EVENT_CLIP dual-AR routing — vertical for short-form surfaces,
+            # landscape for the rest. Substack is handled inline below and
+            # doesn't reach this branch.
+            vertical_platforms = {"instagram", "tiktok", "youtube"}
+            chosen = (
+                media_ids_by_orientation["vertical"]
+                if platform in vertical_platforms
+                else media_ids_by_orientation["landscape"]
+            )
+            platform_media = [chosen]
         else:
             platform_media = media_ids
         # Twitter only: bodies >480 chars become a text thread (mechanical
@@ -3026,6 +3062,96 @@ def run(
 
     if media_error is not None:
         raise media_error
+    if publish_error is not None:
+        raise publish_error
+    return piece
+
+
+def run_event_clip(
+    piece: ContentPiece,
+    *,
+    do_publish: bool = True,
+    wait_for_live: bool = False,
+) -> ContentPiece:
+    """Shipping path for EVENT_CLIP pieces pre-built by the watcher.
+
+    The watcher script (scripts/event_clip_watch.py) does the heavy lifting:
+    yt-dlp fetch → audio extract → Gemini pick → ffmpeg dual-AR cut. It hands
+    us a ContentPiece with title, body, piece.video (landscape) + piece.video_vertical
+    populated and the run-level cost rows already recorded via piece.add_cost.
+
+    From here the flow is identical to run()'s tail: Notion archive → publish
+    (which routes dual-AR per platform inside _schedule_one) → ledger → email.
+    """
+    log.info("=" * 60)
+    log.info(f"  Zeus pipeline -- event_clip: {piece.topic}")
+    log.info("=" * 60)
+
+    # Stable artifact dir. The watcher already wrote the clips into a temp
+    # dir; persist its path so orphan_sweep.py can find them if we crash.
+    if not piece.local_artifact_dir:
+        artifact_dir = ARTIFACT_ROOT / f"{piece.run_id}_{_safe_topic(piece.topic)}"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        piece.local_artifact_dir = str(artifact_dir)
+
+    archive = NotionArchive()
+    with _Phase(piece, "notion_archive_early"):
+        try:
+            archive.archive(piece)
+            log.info(f"  archived (event_clip) -> {piece.notion_page_id}")
+        except Exception as e:
+            log.error(f"  early Notion archive failed: {e}")
+
+    errors = piece.validate()
+    if errors:
+        log.warning(f"  validation issues: {errors}")
+
+    try:
+        archive.update_assets(piece)
+    except Exception as e:
+        log.error(f"  Notion update_assets failed: {e}")
+
+    publish_error: Exception | None = None
+    if do_publish:
+        with _Phase(piece, "publish"):
+            try:
+                publish(piece, wait_for_live=wait_for_live)
+                archive.update_status(piece)
+                try:
+                    archive.write_pipeline_row(piece)
+                except Exception as e:
+                    log.warning(f"  pipeline-row write failed (non-fatal): {e}")
+                log.info(f"  published -> jobs={piece.publer_job_ids}")
+            except Exception as e:
+                publish_error = e
+                log.error(f"  publish failed: {e}")
+    else:
+        log.info("  skip publish (do_publish=False)")
+
+    try:
+        ledger_append(piece)
+    except Exception as e:
+        log.error(f"  ledger_append failed: {e}")
+
+    # EVENT_CLIP emails every run (per memory: only ARTICLE is mute).
+    defer_email = (
+        do_publish
+        and piece.status == "scheduled"
+        and publish_error is None
+    )
+    if defer_email:
+        log.info("  email deferred to publish_watcher")
+    else:
+        try:
+            backend = send_pipeline_summary(piece)
+            log.info(f"  notified -> backend={backend}")
+        except Exception as e:
+            log.error(f"  email failed: {e}")
+
+    log.info(
+        f"DONE — total cost ${piece.total_cost:.4f}, models {piece.models_used}, status={piece.status}"
+    )
+
     if publish_error is not None:
         raise publish_error
     return piece
