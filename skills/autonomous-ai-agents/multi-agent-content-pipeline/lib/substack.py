@@ -199,24 +199,67 @@ def _request_list(method: str, path: str, *, timeout: int = 30) -> list:
     return r.json()
 
 
-def _prosemirror_body(text: str) -> str:
+_YT_ID_RE = re.compile(
+    r"(?:youtube\.com/(?:watch\?v=|shorts/|embed/|v/)|youtu\.be/)([A-Za-z0-9_-]{11})"
+)
+
+
+def youtube_video_id(url: str) -> Optional[str]:
+    """Extract the 11-char YouTube video id from a watch / shorts / youtu.be
+    URL. Returns None if the URL isn't a recognised YouTube link.
+    """
+    if not url:
+        return None
+    m = _YT_ID_RE.search(url)
+    return m.group(1) if m else None
+
+
+def youtube_thumbnail_url(video_id: str) -> str:
+    """YouTube serves a max-res thumbnail at a predictable URL for every public
+    video. Used as the Substack Post cover for EVENT_CLIP runs so the card
+    preview isn't a generic placeholder."""
+    return f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"
+
+
+def _prosemirror_body(text: str, *, youtube_video_id: Optional[str] = None) -> str:
     """Convert plain prose with \\n\\n paragraph breaks to a stringified
     ProseMirror doc. Empty paragraphs are dropped so a trailing newline
     doesn't ship as an empty block.
+
+    When `youtube_video_id` is supplied, a youtube2 embed node is prepended
+    so EVENT_CLIP posts open with the player and the prose flows below. The
+    URL is ALSO appended as a paragraph fallback — if Substack's renderer
+    rejects the embed node shape (their schema versions silently), the reader
+    still sees a clickable link instead of a blank space.
     """
     paragraphs = [p.strip() for p in (text or "").split("\n\n") if p.strip()]
     if not paragraphs:
         paragraphs = [""]
-    doc = {
-        "type": "doc",
-        "content": [
-            {
-                "type": "paragraph",
-                "content": [{"type": "text", "text": p}] if p else [],
-            }
-            for p in paragraphs
-        ],
-    }
+    body_nodes: list[dict] = []
+    if youtube_video_id:
+        body_nodes.append({
+            "type": "youtube2",
+            "attrs": {
+                "videoId": youtube_video_id,
+                "src": f"https://www.youtube.com/watch?v={youtube_video_id}",
+            },
+        })
+    for p in paragraphs:
+        body_nodes.append({
+            "type": "paragraph",
+            "content": [{"type": "text", "text": p}] if p else [],
+        })
+    if youtube_video_id:
+        fallback_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
+        body_nodes.append({
+            "type": "paragraph",
+            "content": [{
+                "type": "text",
+                "text": fallback_url,
+                "marks": [{"type": "link", "attrs": {"href": fallback_url}}],
+            }],
+        })
+    doc = {"type": "doc", "content": body_nodes}
     return json.dumps(doc, ensure_ascii=False)
 
 
@@ -227,16 +270,24 @@ def publish_post(
     body: str,
     cover_image_url: Optional[str] = None,
     audience: str = "everyone",
+    youtube_embed_url: Optional[str] = None,
 ) -> str:
     """Create a draft and publish it. Returns the public post URL.
 
     `audience` accepts "everyone" (free + paid) or "only_paid". The pipeline's
     default is "everyone" — these are SEO/news pieces, not subscriber-only.
+
+    `youtube_embed_url`: when set (EVENT_CLIP pipeline), the post opens with a
+    YouTube player. If `cover_image_url` is unset, the YouTube maxres
+    thumbnail is used as the card preview.
     """
+    yt_id = youtube_video_id(youtube_embed_url) if youtube_embed_url else None
+    if yt_id and not cover_image_url:
+        cover_image_url = youtube_thumbnail_url(yt_id)
     draft_payload: dict = {
         "draft_title": title or "",
         "draft_subtitle": subtitle or "",
-        "draft_body": _prosemirror_body(body),
+        "draft_body": _prosemirror_body(body, youtube_video_id=yt_id),
         "audience": audience,
         "type": "newsletter",
         "draft_bylines": [{"id": _admin_user_id()}],
