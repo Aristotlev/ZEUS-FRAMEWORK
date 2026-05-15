@@ -1,19 +1,25 @@
-"""Event-clip pipeline: pull real-event video from rights-safe channels, let
-Gemini pick the most newsworthy ≤90s soundbite, cut dual-AR clips for
-short-form (9:16) and long-form (16:9) social distribution.
+"""Event-clip pipeline: pull real-event video from rights-safe first-party
+sources, let Gemini pick the most newsworthy ≤90s soundbite, cut dual-AR
+clips for short-form (9:16) and long-form (16:9) social distribution.
 
-Source allowlist is GOVERNMENT / OFFICIAL ONLY (Fed, SEC, Treasury, BLS,
-House FinServ, Senate Banking, C-SPAN, IMF, ECB, BOE, BOJ, corporate IR).
-Rights-safe to re-upload — no strike risk. CNBC/Bloomberg/Reuters/WSJ are
-NEVER added to the default list; their clips will get the social account
-struck within weeks. See feedback_no_unsolicited_advice in memory.
+Sources are GOVERNMENT / OFFICIAL ONLY and hit the publisher's own site
+directly — see lib/event_clip_sources/ for the per-source extractors.
 
 Pipeline shape:
-    yt-dlp (480p mp4)
+    source.list_recent() → UploadCandidate (Brightcove MP4 or HLS m3u8)
+        -> download_media → 480p mp4 on disk
         -> ffmpeg extract 32kbps mono mp3 audio
         -> base64 -> OpenRouter Gemini 2.5 Flash multimodal call
         -> JSON {start_seconds, end_seconds, hook}
         -> ffmpeg cut at timestamps, encode 1080x1920 + 1920x1080 outputs
+
+Why not yt-dlp + YouTube anymore: YouTube's 2026 stack stacks three walls
+(IP reputation + Google session + PO Token + nsig + SABR). Even with a
+residential proxy, a burner-account cookies.txt, and the bgutil-pot sidecar,
+the stream URLs still resolve to "Only images are available for download"
+about as often as not. Each layer is in an active arms race with YouTube,
+which breaks the cron silently. First-party gov sites have zero bot defense
+and have served the same publishers for years.
 
 Gemini is the ONE LLM call: it transcribes + picks + summarises in a single
 multimodal request. No Whisper, no separate transcribe step. The 90-second
@@ -30,42 +36,26 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
 
+from .event_clip_sources import (
+    DEFAULT_SOURCES,
+    SOURCE_REGISTRY,
+    UploadCandidate,
+    download_media,
+    resolve_source,
+)
+
 log = logging.getLogger("zeus.event_clip")
 
 # ---------------------------------------------------------------------------
-# Source channel allowlist. Gov/official only — see module docstring.
-# Channel IDs are YouTube IDs (the @handle resolves to one of these via
-# yt-dlp). Comma-separated list in EVENT_CLIP_CHANNELS env overrides default.
+# Default source list. Each entry is a short source_id resolved against the
+# event_clip_sources registry. EVENT_CLIP_CHANNELS in env overrides; the var
+# name is kept for backward compat with the existing cron config.
 # ---------------------------------------------------------------------------
-DEFAULT_CHANNELS: list[str] = [
-    # Federal Reserve
-    "https://www.youtube.com/@federalreserve",
-    # SEC
-    "https://www.youtube.com/@SECViews",
-    # US Treasury
-    "https://www.youtube.com/@USTreasury",
-    # Bureau of Labor Statistics (NFP, CPI release days)
-    "https://www.youtube.com/@BLSgov",
-    # House Financial Services Committee
-    "https://www.youtube.com/@HouseFinancialCmte",
-    # Senate Banking Committee
-    "https://www.youtube.com/@SenateBanking",
-    # C-SPAN (committee hearings + speeches)
-    "https://www.youtube.com/@cspan",
-    # IMF
-    "https://www.youtube.com/@imf",
-    # European Central Bank
-    "https://www.youtube.com/@europeancentralbank",
-    # Bank of England
-    "https://www.youtube.com/@bankofengland",
-    # Bank of Japan
-    "https://www.youtube.com/@BankofJapan",
-]
+DEFAULT_CHANNELS: list[str] = list(DEFAULT_SOURCES)
 
 # Hard caps (defensive — Gemini can drift past these without the clamp).
 MIN_CLIP_SECONDS = 15
@@ -86,13 +76,27 @@ GEMINI_MODEL = "google/gemini-2.5-flash"
 # ---------------------------------------------------------------------------
 @dataclass
 class ChannelUpload:
-    """One fresh upload from a watched channel."""
+    """One fresh upload from a watched source.
+
+    Field meanings (post-source-layer-refactor):
+      video_id    — source-internal ID (Brightcove video id, CSPAN program id…)
+      title       — display title from the source's metadata
+      url         — human-facing page URL (used for caption attribution + dedup)
+      upload_date — ISO 8601 UTC publication time
+      duration_s  — source duration in seconds (0 if unknown ahead of download)
+      channel_url — kept name for backward compat with callers; now stores
+                    the SOURCE ID (e.g. "cspan"), not a YouTube channel URL.
+      media_url   — direct MP4 or HLS .m3u8 to fetch (set by source layer)
+      media_kind  — "mp4" or "hls" — selects download path in fetch_and_cut
+    """
     video_id: str
     title: str
     url: str
     upload_date: str  # ISO 8601
     duration_s: int
     channel_url: str
+    media_url: str = ""
+    media_kind: str = "mp4"
 
 
 @dataclass
@@ -148,147 +152,90 @@ def lookback_hours_from_env() -> int:
 
 
 # ---------------------------------------------------------------------------
-# yt-dlp wrappers — discovery + download
+# Source-layer dispatch — discovery + download
 # ---------------------------------------------------------------------------
-def _ytdlp_bin() -> str:
-    # Prefer the venv-installed binary (pip install yt-dlp). Fallback to PATH.
-    venv = pathlib.Path("/opt/hermes/.venv/bin/yt-dlp")
-    if venv.is_file():
-        return str(venv)
-    if shutil.which("yt-dlp"):
-        return "yt-dlp"
-    raise EventClipError("yt-dlp not installed — add to Dockerfile pip layer")
-
-
-def _ytdlp_common_args() -> list[str]:
-    """Returns the cookies + proxy args every yt-dlp invocation should carry.
-
-    YouTube hard-blocks datacenter IPs (Hetzner, AWS, GCP) with "Sign in to
-    confirm you're not a bot." The pipeline's cron-driven path requires one
-    of two bypasses:
-
-      EVENT_CLIP_YOUTUBE_COOKIES_PATH — points at a cookies.txt exported
-        from a logged-in browser. yt-dlp uses these for every request.
-        Cookies expire in ~weeks; the user re-exports when they do. THIS IS
-        THE SUPPORTED PRODUCTION PATH.
-
-      EVENT_CLIP_PROXY_URL (or fallback ZEUS_PICKER_PROXY_URL) — routes
-        yt-dlp through a proxy. Webshare datacenter proxies DO NOT bypass
-        YouTube; only residential proxies do. Kept as a fallback in case the
-        user upgrades to a residential tier.
-    """
-    args: list[str] = []
-    cookies_path = os.getenv("EVENT_CLIP_YOUTUBE_COOKIES_PATH", "").strip()
-    if cookies_path and pathlib.Path(cookies_path).is_file():
-        args.extend(["--cookies", cookies_path])
-    proxy = (
-        os.getenv("EVENT_CLIP_PROXY_URL", "").strip()
-        or os.getenv("ZEUS_PICKER_PROXY_URL", "").strip()
-    )
-    # Only attach the proxy when the caller explicitly opted in via
-    # EVENT_CLIP_PROXY_URL — the picker proxy is datacenter-tier and would
-    # ALSO hit YouTube's bot wall, just from a different IP. Forwarding it
-    # silently would mask cookie failures with a proxy-related error.
-    if proxy and os.getenv("EVENT_CLIP_PROXY_URL", "").strip():
-        args.extend(["--proxy", proxy])
-    return args
-
-
 def _ffmpeg_bin() -> str:
     if shutil.which("ffmpeg"):
         return "ffmpeg"
     raise EventClipError("ffmpeg not installed — add to Dockerfile apt layer")
 
 
-def list_fresh_uploads(channel_url: str, *, hours_back: int) -> list[ChannelUpload]:
-    """Return uploads from `channel_url` posted within `hours_back` hours.
+def _to_channel_upload(c: UploadCandidate) -> ChannelUpload:
+    """Bridge dataclass: source layer's UploadCandidate → public ChannelUpload."""
+    return ChannelUpload(
+        video_id=c.video_id,
+        title=c.title,
+        url=c.page_url,
+        upload_date=c.upload_date,
+        duration_s=c.duration_s,
+        channel_url=c.source_id,
+        media_url=c.media_url,
+        media_kind=c.media_kind,
+    )
 
-    Uses `yt-dlp --dump-json --playlist-end 10` to inspect only the channel's
-    most recent 10 entries (avoids paging through years of backlog). Filters
-    locally on upload_date.
+
+def list_fresh_uploads(source_id: str, *, hours_back: int) -> list[ChannelUpload]:
+    """Return uploads from `source_id` posted within `hours_back` hours.
+
+    `source_id` is one of the registered first-party source IDs
+    ("federalreserve", "cspan", "imf", …). For backward compat during the
+    migration off YouTube, a legacy YouTube channel URL passed in here
+    silently yields [] — the cron's env var may still hold YT URLs for a
+    tick or two after deploy, and we don't want it to throw.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
-    cmd = [
-        _ytdlp_bin(),
-        *_ytdlp_common_args(),
-        "--dump-json",
-        "--playlist-end", "10",
-        "--no-warnings",
-        "--ignore-errors",
-        # Skip livestreams — we want recorded speeches/hearings, not WIP.
-        "--match-filter", "!is_live & live_status != is_upcoming",
-        channel_url,
-    ]
-    try:
-        out = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=90, check=False,
+    source = resolve_source(source_id)
+    if source is None:
+        log.info(
+            "event_clip: source %r not in registry — skipping "
+            "(legacy YouTube URL? Update EVENT_CLIP_CHANNELS to source IDs.)",
+            source_id,
         )
-    except subprocess.TimeoutExpired:
-        log.warning("yt-dlp list timeout for %s", channel_url)
         return []
-    if out.returncode != 0 and not out.stdout:
-        log.warning("yt-dlp list failed for %s: %s", channel_url, (out.stderr or "")[:200])
+    try:
+        candidates = source.list_recent(hours_back=hours_back)
+    except Exception as exc:  # broad: source code can fail in many shapes
+        log.warning(
+            "event_clip: source %s list_recent failed: %s", source_id, exc,
+        )
         return []
-    uploads: list[ChannelUpload] = []
-    for line in out.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        upload_date = obj.get("upload_date") or ""  # YYYYMMDD
-        if not upload_date or len(upload_date) != 8:
-            continue
-        try:
-            up_dt = datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if up_dt < cutoff:
-            continue
-        duration_s = int(obj.get("duration") or 0)
-        if duration_s <= 0:
-            continue
-        uploads.append(ChannelUpload(
-            video_id=str(obj.get("id") or ""),
-            title=str(obj.get("title") or "").strip(),
-            url=str(obj.get("webpage_url") or obj.get("original_url") or ""),
-            upload_date=up_dt.isoformat(),
-            duration_s=duration_s,
-            channel_url=channel_url,
-        ))
-    return uploads
+    return [_to_channel_upload(c) for c in candidates]
 
 
-def download_video(url: str, out_dir: pathlib.Path) -> pathlib.Path:
-    """Download mp4 at ≤480p (good enough for Gemini + ffmpeg re-encode).
+def download_video(
+    url_or_upload, out_dir: pathlib.Path,
+) -> pathlib.Path:
+    """Download the source video to `out_dir/source.mp4`.
 
-    Returns the local mp4 path. Raises EventClipError on failure.
+    Accepts either:
+      - A ChannelUpload — uses its media_url + media_kind (preferred path).
+      - A bare URL string — only when it ends with `.mp4` or `.m3u8`. This
+        narrow shape exists so the breaking-news watcher can pass a known
+        media URL through without re-running discovery. Legacy YouTube URLs
+        raise EventClipError; the source layer is the supported entry point.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_template = str(out_dir / "source.%(ext)s")
-    cmd = [
-        _ytdlp_bin(),
-        *_ytdlp_common_args(),
-        "-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/worst[height>=240]",
-        "--merge-output-format", "mp4",
-        "-o", out_template,
-        "--no-warnings",
-        "--no-playlist",
-        url,
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
-    if res.returncode != 0:
-        raise EventClipError(f"yt-dlp download failed: {(res.stderr or res.stdout)[:300]}")
-    mp4 = out_dir / "source.mp4"
-    if not mp4.is_file():
-        # yt-dlp sometimes lands as .mkv when the merge couldn't keep mp4.
-        for p in out_dir.glob("source.*"):
-            if p.suffix.lower() in (".mp4", ".mkv", ".webm"):
-                return p
-        raise EventClipError("yt-dlp succeeded but no output file found")
-    return mp4
+    if isinstance(url_or_upload, ChannelUpload):
+        if not url_or_upload.media_url:
+            raise EventClipError(
+                f"ChannelUpload from source {url_or_upload.channel_url!r} "
+                f"has no media_url — source extractor needs to populate it"
+            )
+        return download_media(
+            url_or_upload.media_url,
+            url_or_upload.media_kind,
+            out_dir,
+        )
+
+    url = str(url_or_upload).strip()
+    if url.endswith(".m3u8"):
+        return download_media(url, "hls", out_dir)
+    if url.endswith(".mp4"):
+        return download_media(url, "mp4", out_dir)
+    raise EventClipError(
+        f"download_video got bare URL {url!r} that isn't a direct mp4/m3u8; "
+        f"pass a ChannelUpload instead. (YouTube ingestion is no longer "
+        f"supported — see lib/event_clip_sources for first-party extractors.)"
+    )
 
 
 def probe_duration_s(path: pathlib.Path) -> float:
@@ -625,8 +572,12 @@ def fetch_and_cut(
         )
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    log.info("downloading %s (%s, %ds)", upload.url, upload.title[:60], upload.duration_s)
-    source_path = download_video(upload.url, work_dir)
+    log.info(
+        "downloading %s [%s] (%s, %ds)",
+        upload.media_url or upload.url, upload.channel_url,
+        upload.title[:60], upload.duration_s,
+    )
+    source_path = download_video(upload, work_dir)
     source_duration = probe_duration_s(source_path)
     if source_duration <= 0:
         source_duration = float(upload.duration_s)
@@ -663,38 +614,43 @@ def fetch_and_cut(
 
 
 # ---------------------------------------------------------------------------
-# Story → channel tagger (used by breaking-news watcher path)
+# Story → source tagger (used by breaking-news watcher path)
 # ---------------------------------------------------------------------------
 # Cheap keyword routing: when a breaking-news headline matches an entity,
-# try its official channel for a fresh upload before falling back to ARTICLE.
-# Order matters — first match wins. Keep tight per minimal-source-lists rule.
+# try its first-party source for a fresh upload before falling back to
+# ARTICLE. Order matters — first match wins. Keep tight per
+# [[feedback_minimal_source_lists]].
+#
+# Values are SOURCE IDs registered in event_clip_sources, NOT URLs. Headlines
+# about entities we no longer ingest (SEC, BLS, BoE, BoJ, House FinSvc) map
+# to "cspan" because C-SPAN covers their newsworthy hearings; ECB has no
+# first-party VOD as of 2026 so its headlines also fall to C-SPAN.
 ENTITY_CHANNEL_HINTS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(powell|federal reserve|fed chair|fomc)\b", re.I),
-     "https://www.youtube.com/@federalreserve"),
-    (re.compile(r"\b(yellen|treasury|bessent)\b", re.I),
-     "https://www.youtube.com/@USTreasury"),
-    (re.compile(r"\b(gensler|atkins|s\.?e\.?c\.?)\b", re.I),
-     "https://www.youtube.com/@SECViews"),
-    (re.compile(r"\b(nfp|cpi|jobs report|payrolls|bls)\b", re.I),
-     "https://www.youtube.com/@BLSgov"),
-    (re.compile(r"\b(house financial|financial services committee)\b", re.I),
-     "https://www.youtube.com/@HouseFinancialCmte"),
-    (re.compile(r"\b(senate banking|banking committee)\b", re.I),
-     "https://www.youtube.com/@SenateBanking"),
-    (re.compile(r"\b(lagarde|ecb|european central)\b", re.I),
-     "https://www.youtube.com/@europeancentralbank"),
-    (re.compile(r"\b(bailey|bank of england|boe)\b", re.I),
-     "https://www.youtube.com/@bankofengland"),
-    (re.compile(r"\b(boj|bank of japan|ueda)\b", re.I),
-     "https://www.youtube.com/@BankofJapan"),
+     "federalreserve"),
     (re.compile(r"\b(imf|kristalina|georgieva)\b", re.I),
-     "https://www.youtube.com/@imf"),
+     "imf"),
+    # Everything below routes to C-SPAN — it carries congressional
+    # testimony + press conferences for these entities, and is the only
+    # first-party path we have for them post-YouTube.
+    (re.compile(r"\b(yellen|treasury|bessent)\b", re.I), "cspan"),
+    (re.compile(r"\b(gensler|atkins|s\.?e\.?c\.?)\b", re.I), "cspan"),
+    (re.compile(r"\b(nfp|cpi|jobs report|payrolls|bls)\b", re.I), "cspan"),
+    (re.compile(r"\b(house financial|financial services committee)\b", re.I),
+     "cspan"),
+    (re.compile(r"\b(senate banking|banking committee)\b", re.I), "cspan"),
+    (re.compile(r"\b(lagarde|ecb|european central)\b", re.I), "cspan"),
+    (re.compile(r"\b(bailey|bank of england|boe)\b", re.I), "cspan"),
+    (re.compile(r"\b(boj|bank of japan|ueda)\b", re.I), "cspan"),
 ]
 
 
 def candidate_channel_for_headline(title: str) -> Optional[str]:
-    """Return the most-likely official channel URL for `title`, or None."""
-    for pattern, channel in ENTITY_CHANNEL_HINTS:
+    """Return the most-likely source ID for `title`, or None.
+
+    Caller passes the result to list_fresh_uploads(source_id, …) directly.
+    """
+    for pattern, source_id in ENTITY_CHANNEL_HINTS:
         if pattern.search(title or ""):
-            return channel
+            return source_id
     return None
