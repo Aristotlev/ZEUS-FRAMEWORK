@@ -79,10 +79,14 @@ PLATFORMS_BY_TYPE: dict[ContentType, list[str]] = {
     # Same dims, same publish flow once the generator lands.
     ContentType.SHORT_VIDEO_AVATAR: ["twitter", "instagram", "linkedin", "tiktok", "youtube", "facebook"],
     ContentType.LONG_VIDEO_AVATAR: ["youtube", "twitter", "linkedin", "reddit"],
-    # EVENT_CLIP fans out to every video-friendly platform plus Substack
-    # for a Post with the landscape embed. Per-platform AR routing happens
-    # in publish() based on piece.video_vertical (when present).
-    ContentType.EVENT_CLIP: ["twitter", "instagram", "linkedin", "tiktok", "youtube", "facebook", "substack"],
+    # EVENT_CLIP fans out to every video-friendly platform plus Substack.
+    # YouTube Shorts is INTENTIONALLY excluded (2026-05-15): hourly soundbite
+    # uploads from gov channels would trip YT's repetitive-content / minimal-
+    # transformation policy → algorithmic suppression + eventual strikes.
+    # The other 5 surfaces (X/IG/TikTok/LinkedIn/FB) reward this format and
+    # have no equivalent policy. Per-platform AR routing happens in
+    # publish() based on piece.video_vertical (when present).
+    ContentType.EVENT_CLIP: ["twitter", "instagram", "linkedin", "tiktok", "facebook", "substack"],
 }
 
 
