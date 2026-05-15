@@ -252,7 +252,7 @@ DEFAULT_SOURCES_BY_NICHE: dict[str, list[str]] = {
         "unusualwhales.com",
     ],
     "forex": [
-        "ft.com", "marketwatch.com", "investing.com",
+        "ft.com", "marketwatch.com", "investing.com", "investinglive.com",
         "businessinsider.com", "axios.com",
         "fxstreet.com", "dailyfx.com", "forexlive.com", "kitco.com",
         "unusualwhales.com",
@@ -264,7 +264,7 @@ DEFAULT_SOURCES_BY_NICHE: dict[str, list[str]] = {
         "unusualwhales.com",
     ],
     "geopolitics": [
-        "aljazeera.com", "bbc.com", "ft.com", "apnews.com",
+        "aljazeera.com", "bbc.com", "bbc.co.uk", "ft.com", "apnews.com",
         "dw.com", "theguardian.com",
         "france24.com", "politico.eu", "npr.org",
         "unusualwhales.com",
@@ -273,7 +273,7 @@ DEFAULT_SOURCES_BY_NICHE: dict[str, list[str]] = {
         "newsdigest.ai", "techcrunch.com", "theverge.com",
         "venturebeat.com", "arstechnica.com", "axios.com",
         "wired.com", "technologyreview.com", "theregister.com",
-        "restofworld.org",
+        "restofworld.org", "semafor.com", "economictimes.indiatimes.com",
         "unusualwhales.com",
     ],
 }
