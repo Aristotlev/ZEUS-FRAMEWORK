@@ -524,26 +524,43 @@ def cut_dual_ar(
     vertical = out_dir / "clip_vertical.mp4"
     landscape = out_dir / "clip_landscape.mp4"
 
-    # Vertical 1080x1920 — letterbox the source into vertical canvas, then
-    # burn the hook at the bottom. drawtext uses the system DejaVuSans font
-    # which is pre-installed on the debian:13.4 base image.
+    # Vertical 1080x1920 — TikTok-style blurred-background fill instead of
+    # black bars. Source (typically 480p from yt-dlp) is too small for IG
+    # Reels' implicit "must look fullscreen" check, and Publer's IG handler
+    # rejected our letterboxed first attempt with "Post type is not valid"
+    # (2026-05-15 Bowman run). The blurred-bg pattern:
+    #   - duplicate the input stream
+    #   - bg: scale-to-cover 1080x1920, crop to fit, heavy boxblur
+    #   - fg: scale to width 1080 maintaining aspect
+    #   - overlay fg centered on bg
+    # Result is a fullscreen vertical Reel-spec frame with no flat-black
+    # padding, which IG/TikTok/Shorts all accept cleanly.
     hook_escaped = (hook or "").replace("'", "").replace(":", " -")[:120]
     vf_vertical = (
-        f"scale=1080:-2,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
+        "[0:v]split=2[bg][fg];"
+        "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,boxblur=24:5[bgblur];"
+        "[fg]scale=1080:-2[fgs];"
+        "[bgblur][fgs]overlay=(W-w)/2:(H-h)/2,"
         f"drawtext=text='{hook_escaped}':"
-        f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
-        f"fontcolor=white:fontsize=42:"
-        f"box=1:boxcolor=black@0.7:boxborderw=18:"
-        f"x=(w-text_w)/2:y=h-220"
+        "fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
+        "fontcolor=white:fontsize=42:"
+        "box=1:boxcolor=black@0.7:boxborderw=18:"
+        "x=(w-text_w)/2:y=h-220"
     )
     cmd_v = [
         _ffmpeg_bin(), "-y",
         "-ss", f"{start_s:.3f}",
         "-i", str(source_path),
         "-t", f"{duration_s:.3f}",
-        "-vf", vf_vertical,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-filter_complex", vf_vertical,
+        # IG Reels prefers ~3-5 Mbps for 1080x1920 H.264. Our previous CRF=23
+        # at low-res input was producing ~500 kbps which is technically valid
+        # but reads as "low quality" to IG's transcoder.
+        "-c:v", "libx264", "-preset", "fast", "-b:v", "4M", "-maxrate", "5M", "-bufsize", "8M",
+        "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k",
+        "-r", "30",
         "-movflags", "+faststart",
         str(vertical),
     ]

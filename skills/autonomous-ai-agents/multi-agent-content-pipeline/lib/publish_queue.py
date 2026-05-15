@@ -35,6 +35,14 @@ QUEUE_PATH = zeus_data_path("zeus_publish_queue.jsonl")
 ARCHIVE_PATH = zeus_data_path("zeus_publish_done.jsonl")
 
 
+def _serialize_asset(a) -> dict:
+    return {
+        "url": a.url, "kind": a.kind, "width": a.width, "height": a.height,
+        "duration_s": a.duration_s, "model": a.model, "cost_usd": a.cost_usd,
+        "local_path": a.local_path,
+    }
+
+
 def _piece_to_dict(piece: ContentPiece) -> dict:
     """Serialize a ContentPiece for the watcher. Drops binary refs but keeps URLs / paths."""
     return {
@@ -43,19 +51,15 @@ def _piece_to_dict(piece: ContentPiece) -> dict:
         "body": piece.body,
         "topic": piece.topic,
         "audio_mode": piece.audio_mode.value if piece.audio_mode else None,
-        "images": [
-            {"url": a.url, "kind": a.kind, "width": a.width, "height": a.height,
-             "duration_s": a.duration_s, "model": a.model, "cost_usd": a.cost_usd,
-             "local_path": a.local_path}
-            for a in piece.images
-        ],
-        "video": (
-            {"url": piece.video.url, "kind": piece.video.kind,
-             "width": piece.video.width, "height": piece.video.height,
-             "duration_s": piece.video.duration_s, "model": piece.video.model,
-             "cost_usd": piece.video.cost_usd, "local_path": piece.video.local_path}
-            if piece.video else None
-        ),
+        "images": [_serialize_asset(a) for a in piece.images],
+        "video": _serialize_asset(piece.video) if piece.video else None,
+        # EVENT_CLIP: vertical AR cut shipped to IG/TikTok/YT Shorts. Without
+        # this field in the queue row, the watcher's hydrate() drops it and a
+        # retry path can't recover the per-platform asset routing.
+        "video_vertical": _serialize_asset(piece.video_vertical) if piece.video_vertical else None,
+        # EVENT_CLIP: source video URL goes into the watcher email + a
+        # potential Substack-retry path. Plain str, always serialisable.
+        "source_video_url": piece.source_video_url or "",
         "created_at": piece.created_at.isoformat(),
         "posted_at": piece.posted_at.isoformat() if piece.posted_at else None,
         "publer_job_ids": dict(piece.publer_job_ids),
@@ -98,6 +102,15 @@ def _piece_from_dict(d: dict) -> ContentPiece:
             duration_s=v.get("duration_s"), model=v.get("model") or "",
             cost_usd=float(v.get("cost_usd") or 0), local_path=v.get("local_path"),
         )
+    if d.get("video_vertical"):
+        vv = d["video_vertical"]
+        piece.video_vertical = GeneratedAsset(
+            url=vv["url"], kind=vv.get("kind", "video"),
+            width=vv.get("width"), height=vv.get("height"),
+            duration_s=vv.get("duration_s"), model=vv.get("model") or "",
+            cost_usd=float(vv.get("cost_usd") or 0), local_path=vv.get("local_path"),
+        )
+    piece.source_video_url = d.get("source_video_url") or ""
     if d.get("created_at"):
         try:
             piece.created_at = datetime.fromisoformat(d["created_at"])

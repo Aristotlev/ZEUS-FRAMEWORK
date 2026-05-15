@@ -2586,20 +2586,17 @@ def _publish_substack(piece: ContentPiece) -> None:
             url = substack_publish_note(piece.body)
             log.info(f"  -> substack note live: {url}")
         elif piece.content_type == ContentType.EVENT_CLIP:
-            # Substack Post (long-form) with the source YouTube video embedded
-            # at the top via a youtube2 ProseMirror node. Cover defaults to
-            # the YT maxres thumbnail when piece has no generated cover image.
-            # Reader sees the player + our editorial commentary in one card.
-            subtitle = (piece.topic or "").strip()
-            cover = piece.images[0].url if piece.images else None
-            url = substack_publish_post(
-                title=piece.title or piece.topic or "(untitled)",
-                subtitle=subtitle,
-                body=piece.body,
-                cover_image_url=cover,
-                youtube_embed_url=piece.source_video_url or None,
-            )
-            log.info(f"  -> substack event-clip post live: {url}")
+            # Note (user-mandated 2026-05-15: "make them notes on substack as
+            # i said"). The YouTube source URL goes on its own line so
+            # Substack's link-unfurl service renders it as a video card —
+            # readers see the player without us touching Substack's video
+            # upload endpoints. Notes match the short-form social cadence
+            # better than Posts (no email blast on every clip).
+            note_body = (piece.body or "").strip()
+            if piece.source_video_url:
+                note_body = f"{note_body}\n\n{piece.source_video_url}".strip()
+            url = substack_publish_note(note_body)
+            log.info(f"  -> substack event-clip note live: {url}")
         else:
             # LONG_ARTICLE — full post. Subtitle defaults to topic when the
             # writer didn't produce one (keeps the Substack card preview

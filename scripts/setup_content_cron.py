@@ -342,12 +342,13 @@ def _build_jobs(niche: List[str]):
         },
         {
             "name": "zeus-content-event-clip",
-            # Every 30 min. Source supply on gov/official channels averages
-            # 3-8 clip-worthy uploads/day on a normal day, bursting to 15-25
-            # on FOMC/NFP days — so 30-min cadence is plenty. Each ship is
-            # heavier than ARTICLE (yt-dlp + ffmpeg + Gemini audio), so the
-            # cap stays at 1/fire + 3/hr + 30/day until we see real volume.
-            "schedule": "*/30 * * * *",
+            # Every hour on the hour. User-requested 2026-05-15 to ship more
+            # often. The watcher dedups against ~/.hermes/event_clip_seen.db
+            # so empty hours (between uploads) cost almost nothing — only
+            # the yt-dlp listing API calls, no Gemini/ffmpeg/Publer spend.
+            # Hard caps in event_clip_watch.py still gate to 1/fire so a
+            # bursty FOMC day can't blast all platforms at once.
+            "schedule": "0 * * * *",
             "prompt": event_clip_slot,
         },
         {
