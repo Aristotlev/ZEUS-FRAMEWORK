@@ -144,6 +144,12 @@ class SenateBankingSource(VideoSource):
                 duration_s=0,  # probed at download time
                 media_url=m3u8_url,
                 media_kind="hls",
+                # Akamai keys on Referer for the signed manifest and gates
+                # the agent container IP entirely. Direct try first with
+                # the hearing page as Referer; on 403, retry through the
+                # sidecar with the hearing page primed.
+                referer=page_url,
+                use_browser_fallback=True,
             ))
             if len(results) >= 4:
                 break

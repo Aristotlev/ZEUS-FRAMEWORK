@@ -88,6 +88,12 @@ class ChannelUpload:
                     the SOURCE ID (e.g. "cspan"), not a YouTube channel URL.
       media_url   — direct MP4 or HLS .m3u8 to fetch (set by source layer)
       media_kind  — "mp4" or "hls" — selects download path in fetch_and_cut
+      referer     — Referer to send on media fetch (cspan/senate_banking
+                    CDNs key on it). When None, no Referer is sent.
+      use_browser_fallback — if True, a 403/connection failure on the
+                    direct media fetch triggers a retry through the
+                    deploy/browser-fetch sidecar. Set by sources whose
+                    CDN rejects the Hetzner datacenter IP.
     """
     video_id: str
     title: str
@@ -97,6 +103,8 @@ class ChannelUpload:
     channel_url: str
     media_url: str = ""
     media_kind: str = "mp4"
+    referer: Optional[str] = None
+    use_browser_fallback: bool = False
 
 
 @dataclass
@@ -171,6 +179,8 @@ def _to_channel_upload(c: UploadCandidate) -> ChannelUpload:
         channel_url=c.source_id,
         media_url=c.media_url,
         media_kind=c.media_kind,
+        referer=c.referer,
+        use_browser_fallback=c.use_browser_fallback,
     )
 
 
@@ -224,6 +234,8 @@ def download_video(
             url_or_upload.media_url,
             url_or_upload.media_kind,
             out_dir,
+            referer=url_or_upload.referer,
+            use_browser_fallback=url_or_upload.use_browser_fallback,
         )
 
     url = str(url_or_upload).strip()

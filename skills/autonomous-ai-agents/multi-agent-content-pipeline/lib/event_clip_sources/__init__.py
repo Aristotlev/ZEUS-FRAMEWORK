@@ -19,20 +19,20 @@ Source unlocks:
                        YouTube-only orgs (BLS, SEC, BoE, BoJ, ECB, HFSC)
                        we can't reach automatically — grab the clip on a
                        real browser and drop the mp4.
-  - cspan          (V1.1, 2026-05-15) — listing + program-page metadata
+  - cspan          (V1.2, 2026-05-16) — listing + program-page metadata
                        via the deploy/browser-fetch headless Chromium
                        sidecar. Media download tries the deterministic
-                       m3u8; if CloudFront 403s it the watcher logs
-                       skipped:download_failed and we route through
-                       /fetch-binary in V2.
+                       m3u8 with the program page as Referer; on 403 the
+                       central download_media falls back to /fetch-binary
+                       (manifest + every TS segment through Chromium).
   - imf            (V1.1, 2026-05-15) — listing via browser sidecar
                        (replaces the dead residential-proxy path);
                        Brightcove Playback API reachable direct so media
                        downloads as usual.
-  - senate_banking (V1.1, 2026-05-15) — listing + hearing-page render via
+  - senate_banking (V1.2, 2026-05-16) — listing + hearing-page render via
                        sidecar with capture_responses_regex set to grab
-                       the Akamai HLS manifest. Media download may 403 at
-                       Akamai's edge; same V2 fallback as cspan if it does.
+                       the Akamai HLS manifest. Media download retries
+                       through /fetch-binary on Akamai 403, same as cspan.
 
 YouTube-only orgs with no first-party VOD as of 2026 (ECB, BLS, SEC, HFSC,
 BOE, BOJ): no auto path. Use the `manual` drop source.

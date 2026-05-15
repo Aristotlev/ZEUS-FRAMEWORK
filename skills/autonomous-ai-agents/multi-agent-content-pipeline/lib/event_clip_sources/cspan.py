@@ -184,6 +184,12 @@ class CSpanSource(VideoSource):
                     f"program.{program_id}.tsc.m3u8"
                 ),
                 media_kind="hls",
+                # CloudFront often 403s the Hetzner IP on the bare m3u8.
+                # Send the program page as Referer on the direct try, and
+                # retry through the sidecar (with the program page primed)
+                # if that still fails.
+                referer=page_url,
+                use_browser_fallback=True,
             ))
             if len(results) >= 5:
                 break
