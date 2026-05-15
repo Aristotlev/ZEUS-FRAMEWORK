@@ -394,13 +394,18 @@ def _final_status(states: dict[str, str], piece: ContentPiece, past_deadline: bo
     confirmed = [p for p, s in states.items() if s == "live"]
     failed = [p for p, s in states.items() if s == "failed"]
     pending = [p for p, s in states.items() if s == "pending"]
-    # PENDING_UPLOAD: Publer /media 429'd on the original publish run so every
-    # Publer platform is marked FAILED with a "PENDING_UPLOAD:" prefix. These
-    # are transient — Substack may already be live. Skip the 24h past_deadline
-    # gate and return "failed" immediately so _retry_publish re-runs publish()
-    # this tick. Higher retry cap (PENDING_UPLOAD_MAX_RETRIES) applies there.
-    if _has_pending_upload(piece) and not confirmed and not pending:
-        return "failed"
+    # PENDING_UPLOAD: Publer /media rejected the original upload (429 OR the
+    # GPT Image 2 caBX-chunk 400 surfaced 2026-05-15) so every Publer platform
+    # is marked FAILED with a "PENDING_UPLOAD:" prefix. Substack publishes
+    # inline (separate API path) so it can be live while every Publer slot
+    # still needs a retry — without this branch the watcher classifies the run
+    # as "partial" the moment Substack comes back live and never retries the
+    # Publer fan-out. Treat it as failed-needing-retry whenever Publer
+    # platforms specifically haven't landed.
+    if _has_pending_upload(piece):
+        publer_confirmed = [p for p in confirmed if p != "substack"]
+        if not publer_confirmed and not pending:
+            return "failed"
     # 'skipped' platforms — never attempted (no Publer account ID) — and
     # 'dropped' platforms (TikTok grace expired without a permalink) are
     # ignored when judging status. A run that landed on twitter+linkedin
@@ -473,9 +478,14 @@ def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:
     # almost always means the post WENT LIVE and the watcher just
     # couldn't see it (Publer rate-limit, transient API errors).
     # Re-publishing in that case duplicates every platform that worked.
+    # Substack is published inline (not through Publer's /posts/schedule) so
+    # its "POSTED" / http url marker is NOT evidence of a Publer accepted job.
+    # Exclude it here — otherwise a healthy Substack post blocks the watcher
+    # from ever retrying a Publer fan-out that hit PENDING_UPLOAD.
     accepted_jobs = [
         (plat, jid) for plat, jid in piece.publer_job_ids.items()
-        if not plat.endswith("_url") and jid and not str(jid).startswith("FAILED")
+        if not plat.endswith("_url") and plat != "substack"
+        and jid and not str(jid).startswith("FAILED")
     ]
     if accepted_jobs:
         log.error(
