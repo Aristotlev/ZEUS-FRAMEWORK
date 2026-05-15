@@ -160,6 +160,40 @@ def _ytdlp_bin() -> str:
     raise EventClipError("yt-dlp not installed — add to Dockerfile pip layer")
 
 
+def _ytdlp_common_args() -> list[str]:
+    """Returns the cookies + proxy args every yt-dlp invocation should carry.
+
+    YouTube hard-blocks datacenter IPs (Hetzner, AWS, GCP) with "Sign in to
+    confirm you're not a bot." The pipeline's cron-driven path requires one
+    of two bypasses:
+
+      EVENT_CLIP_YOUTUBE_COOKIES_PATH — points at a cookies.txt exported
+        from a logged-in browser. yt-dlp uses these for every request.
+        Cookies expire in ~weeks; the user re-exports when they do. THIS IS
+        THE SUPPORTED PRODUCTION PATH.
+
+      EVENT_CLIP_PROXY_URL (or fallback ZEUS_PICKER_PROXY_URL) — routes
+        yt-dlp through a proxy. Webshare datacenter proxies DO NOT bypass
+        YouTube; only residential proxies do. Kept as a fallback in case the
+        user upgrades to a residential tier.
+    """
+    args: list[str] = []
+    cookies_path = os.getenv("EVENT_CLIP_YOUTUBE_COOKIES_PATH", "").strip()
+    if cookies_path and pathlib.Path(cookies_path).is_file():
+        args.extend(["--cookies", cookies_path])
+    proxy = (
+        os.getenv("EVENT_CLIP_PROXY_URL", "").strip()
+        or os.getenv("ZEUS_PICKER_PROXY_URL", "").strip()
+    )
+    # Only attach the proxy when the caller explicitly opted in via
+    # EVENT_CLIP_PROXY_URL — the picker proxy is datacenter-tier and would
+    # ALSO hit YouTube's bot wall, just from a different IP. Forwarding it
+    # silently would mask cookie failures with a proxy-related error.
+    if proxy and os.getenv("EVENT_CLIP_PROXY_URL", "").strip():
+        args.extend(["--proxy", proxy])
+    return args
+
+
 def _ffmpeg_bin() -> str:
     if shutil.which("ffmpeg"):
         return "ffmpeg"
@@ -176,6 +210,7 @@ def list_fresh_uploads(channel_url: str, *, hours_back: int) -> list[ChannelUplo
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
     cmd = [
         _ytdlp_bin(),
+        *_ytdlp_common_args(),
         "--dump-json",
         "--playlist-end", "10",
         "--no-warnings",
@@ -235,7 +270,8 @@ def download_video(url: str, out_dir: pathlib.Path) -> pathlib.Path:
     out_template = str(out_dir / "source.%(ext)s")
     cmd = [
         _ytdlp_bin(),
-        "-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]",
+        *_ytdlp_common_args(),
+        "-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/worst[height>=240]",
         "--merge-output-format", "mp4",
         "-o", out_template,
         "--no-warnings",
@@ -417,20 +453,49 @@ def pick_soundbite(
 
 
 def clamp_window(start: float, end: float, source_duration_s: float) -> tuple[float, float]:
-    """Defensive clamp — Gemini sometimes drifts past MAX_CLIP_SECONDS or
-    overshoots the source duration. Returns valid (start, end) or raises if
-    the window can't be salvaged (e.g. start < 0 means "SKIP")."""
+    """Defensive clamp — Gemini sometimes drifts past MAX_CLIP_SECONDS, picks
+    a window narrower than MIN, or overshoots the source duration.
+
+    Behaviour:
+      - negative timestamps mean "SKIP" -> raise EventClipError
+      - over-long windows are trimmed to MAX_CLIP_SECONDS
+      - too-short windows are SYMMETRICALLY PADDED toward MIN_CLIP_SECONDS,
+        bounded by [0, source_duration]. Many newsworthy quotes are genuinely
+        12-13s long; we want them shipped with ~2-3s of breathing room, not
+        rejected. Only when the source itself is shorter than MIN do we raise.
+    """
     if start < 0 or end < 0:
         raise EventClipError("Gemini returned SKIP / negative timestamps")
-    start = max(0.0, min(start, max(0.0, source_duration_s - MIN_CLIP_SECONDS)))
+    if source_duration_s < MIN_CLIP_SECONDS:
+        raise EventClipError(
+            f"source only {source_duration_s:.1f}s long (min clip {MIN_CLIP_SECONDS}s)"
+        )
+
+    # Trim overshoot first.
     end = min(end, source_duration_s)
+    start = max(0.0, start)
+    if end <= start:
+        raise EventClipError(f"invalid window: start={start:.1f} end={end:.1f}")
+
     if end - start > MAX_CLIP_SECONDS:
         end = start + MAX_CLIP_SECONDS
+        return start, end
+
     if end - start < MIN_CLIP_SECONDS:
-        # Window too narrow to be a useful soundbite.
-        raise EventClipError(
-            f"window only {end - start:.1f}s wide (min {MIN_CLIP_SECONDS}s)"
-        )
+        # Symmetric pad toward MIN_CLIP_SECONDS, clipped to source bounds.
+        needed = MIN_CLIP_SECONDS - (end - start)
+        pad_each_side = needed / 2.0
+        new_start = max(0.0, start - pad_each_side)
+        new_end = min(source_duration_s, end + pad_each_side)
+        # If one side hit a bound, push the other to make up the deficit.
+        if new_end - new_start < MIN_CLIP_SECONDS:
+            deficit = MIN_CLIP_SECONDS - (new_end - new_start)
+            if new_start > 0:
+                new_start = max(0.0, new_start - deficit)
+            else:
+                new_end = min(source_duration_s, new_end + deficit)
+        start, end = new_start, new_end
+
     return start, end
 
 

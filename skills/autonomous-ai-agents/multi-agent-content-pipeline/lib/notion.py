@@ -635,6 +635,9 @@ def _content_type_label(ct: ContentType) -> str:
         ContentType.CAROUSEL: "Carousel",
         ContentType.SHORT_VIDEO: "Short-form Video",
         ContentType.LONG_VIDEO: "Long-form Video",
+        ContentType.SHORT_VIDEO_AVATAR: "Short-form Video",
+        ContentType.LONG_VIDEO_AVATAR: "Long-form Video",
+        ContentType.EVENT_CLIP: "Event Clip",
     }[ct]
 
 
