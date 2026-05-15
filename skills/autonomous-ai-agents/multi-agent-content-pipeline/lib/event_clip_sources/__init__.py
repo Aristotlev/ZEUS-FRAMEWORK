@@ -1,36 +1,41 @@
 """First-party gov/official video sources for the EVENT_CLIP pipeline.
 
 Replaces yt-dlp + YouTube. YouTube's 2026 stack (residential IP block +
-session auth + PO Token + nsig + SABR) is no longer reliably bypassable; see
-the inline note in lib/event_clip.py for the full history. Every source here
-hits the original publisher (federalreserve.gov, c-span.org, imf.org) and
-downloads via plain HTTP/HLS — no cookies, no PO tokens, no arms race.
+session auth + PO Token + nsig + SABR) is no longer reliably bypassable;
+see the inline note in lib/event_clip.py for the full history. Every
+source here hits the original publisher (federalreserve.gov, c-span.org,
+imf.org, banking.senate.gov) directly — no PO tokens, no arms race.
 
-A source is identified by a short `source_id` ("cspan", "federalreserve",
-"imf"). The cron poller uses EVENT_CLIP_CHANNELS as a comma-separated list
-of these IDs — historically it held YouTube channel URLs.
+A source is identified by a short `source_id` ("manual", "federalreserve",
+"cspan", "imf", "senate_banking"). The cron poller uses EVENT_CLIP_CHANNELS
+as a comma-separated list of these IDs.
 
-V1 sources actually enabled by default:
-  - federalreserve — Brightcove direct MP4/HLS (account 66043936001).
-    Tested end-to-end from prod IP on 2026-05-15: returns April FOMC
-    Powell presser with a signed Brightcove CDN MP4. No proxy needed.
+Source unlocks:
+  - federalreserve (V1, 2026-05-15) — Brightcove direct, plain HTTP.
+  - manual         (V1.1, 2026-05-15) — scp drop into
+                       /opt/zeus/event_clip_inbox. Pipeline picks the file
+                       up on the next hourly cron, Gemini chooses the ≤90s
+                       window, Publer + Substack fan-out. Use for
+                       YouTube-only orgs (BLS, SEC, BoE, BoJ, ECB, HFSC)
+                       we can't reach automatically — grab the clip on a
+                       real browser and drop the mp4.
+  - cspan          (V1.1, 2026-05-15) — listing + program-page metadata
+                       via the deploy/browser-fetch headless Chromium
+                       sidecar. Media download tries the deterministic
+                       m3u8; if CloudFront 403s it the watcher logs
+                       skipped:download_failed and we route through
+                       /fetch-binary in V2.
+  - imf            (V1.1, 2026-05-15) — listing via browser sidecar
+                       (replaces the dead residential-proxy path);
+                       Brightcove Playback API reachable direct so media
+                       downloads as usual.
+  - senate_banking (V1.1, 2026-05-15) — listing + hearing-page render via
+                       sidecar with capture_responses_regex set to grab
+                       the Akamai HLS manifest. Media download may 403 at
+                       Akamai's edge; same V2 fallback as cspan if it does.
 
-Sources registered but NOT in DEFAULT_SOURCES (kept in-tree so V2 can
-re-enable once we add a Cloudflare/Akamai bypass — Playwright sidecar or
-Bright Data Web Unlocker):
-  - cspan — c-span.org sits behind Cloudflare 202 challenge from Hetzner;
-            program pages are also SPA-rendered with :::title::: placeholders.
-            Deterministic m3u8 URLs are CloudFront-403'd without signed tokens.
-  - imf   — /en/News/SearchNews 403s even through Webshare residential
-            proxy. Listing is unreachable; Brightcove Playback API itself
-            does work direct, so once listing is solved this lights up.
-
-Tier 2 sources fully dropped from the original 11-channel allowlist
-(audited 2026-05-15 — see audit task transcripts):
-  - ecb            — fully YouTube-backed as of 2026; no first-party VOD
-  - senate_banking — Akamai 403 regardless of headers/proxy
-  - treasury       — YorkCast geo-blocks Hetzner; Vbrick API needs auth
-  - bls/sec/hfsc/boe/boj — YouTube-only or no video infrastructure
+YouTube-only orgs with no first-party VOD as of 2026 (ECB, BLS, SEC, HFSC,
+BOE, BOJ): no auto path. Use the `manual` drop source.
 """
 from __future__ import annotations
 
@@ -45,15 +50,21 @@ from .base import (
 )
 from .brightcove import FED_SOURCE, IMF_SOURCE
 from .cspan import CSPAN_SOURCE
+from .manual import MANUAL_SOURCE
+from .senate_banking import SENATE_BANKING_SOURCE
 
 # Default ordered source list. The cron polls them in this order. Order
-# affects only tie-breaking when two sources surface the same event — we
-# prefer the publisher's own site over C-SPAN's secondary capture.
-# Only sources that produce candidates from prod's Hetzner IP without
-# additional infrastructure. cspan + imf are registered but stay off the
-# default list until they can actually return media.
+# only matters for tie-breaking when two sources surface the same event;
+# we prefer the publisher's own site over C-SPAN's secondary capture.
+#
+# Manual goes first — if the user explicitly dropped a file, that should
+# win against any auto-discovered candidate that might overlap.
 DEFAULT_SOURCES: list[str] = [
+    "manual",
     "federalreserve",
+    "imf",
+    "senate_banking",
+    "cspan",
 ]
 
 __all__ = [
@@ -68,4 +79,6 @@ __all__ = [
     "FED_SOURCE",
     "IMF_SOURCE",
     "CSPAN_SOURCE",
+    "MANUAL_SOURCE",
+    "SENATE_BANKING_SOURCE",
 ]

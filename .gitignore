@@ -17,6 +17,9 @@ logs/
 data/
 wandb/
 .DS_Store
+# EVENT_CLIP manual-drop inbox — bind-mounted into the container on the
+# prod VM. Holds raw mp4/mov/mkv files scp'd by the user. Never committed.
+/event_clip_inbox/
 # Claude Code subagent worktrees — local session scratch space, never commit
 .claude/worktrees/
 # Claude Code per-user local settings — leaks usernames + local paths

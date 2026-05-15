@@ -21,6 +21,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
+from . import _browser
 from .base import (
     SourceListingError,
     UploadCandidate,
@@ -239,36 +240,33 @@ FED_SOURCE = register(BrightcoveSource(
 # IMF listing scraper — imf.org
 # ---------------------------------------------------------------------------
 # IMF's video page URL pattern: /en/videos/view/{13-digit Brightcove id}.
-# Listing surfaces on /en/News/SearchNews?f:type=[Videos] but that page
-# 403s the Hetzner datacenter IP — must go through ZEUS_PICKER_PROXY_URL.
-# Fallback: imf.org RSS at /en/News/SearchNews?as_rss=true&...
+# Listing surfaces on /en/News/SearchNews?f:type=[Videos]; the page 403s
+# the Hetzner datacenter IP AND the residential proxy we tried (audit
+# 2026-05-15). The browser-fetch sidecar's headless Chromium passes both
+# the CDN check and the SPA hydration needed to expose the video links.
+# The Playback API itself is reachable direct, so once discovery yields
+# video IDs the BrightcoveSource flow takes over unchanged.
 _IMF_VIDEO_LINK_RE = re.compile(
     r'/en/videos/view/(\d{10,16})', re.I,
 )
 
 
 def _imf_list_video_ids(hours_back: int) -> list[tuple[str, str]]:
-    """Scrape imf.org SearchNews (video filter) via proxy for fresh ids.
-
-    The listing endpoint 403s our datacenter IP at the CDN; the Playback API
-    itself is reachable direct. So we proxy ONLY the discovery hop.
-    """
+    """Scrape imf.org SearchNews (video filter) via the browser sidecar."""
     del hours_back
+    if not _browser.is_available():
+        log.info("imf: browser-fetch sidecar unavailable — returning []")
+        return []
     home = "https://www.imf.org"
     listing_url = f"{home}/en/News/SearchNews?f:type=[Videos]&page=1"
-    try:
-        r = http_get(listing_url, use_proxy=True, timeout=30)
-        if r.status_code != 200:
-            log.warning("imf listing %d: %s", r.status_code, r.text[:200])
-            return []
-        html = r.text
-    except Exception as exc:
-        log.warning("imf listing fetch failed: %s", exc)
+    fr = _browser.fetch_page(listing_url, wait_seconds=2.5)
+    if fr is None or fr.status >= 400 or not fr.html:
+        log.warning("imf listing via sidecar failed")
         return []
 
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
-    for m in _IMF_VIDEO_LINK_RE.finditer(html):
+    for m in _IMF_VIDEO_LINK_RE.finditer(fr.html):
         vid = m.group(1)
         if vid in seen:
             continue
@@ -289,5 +287,5 @@ IMF_SOURCE = register(BrightcoveSource(
         "UWCUgYJf60YjKpQHo80g66fVlwkU5jc-XVGL7s4VKtK3rkNdhlGCcROQ8HE08"
     ),
     list_video_ids=_imf_list_video_ids,
-    listing_needs_proxy=True,
+    listing_needs_proxy=False,  # browser sidecar replaces the proxy hop
 ))

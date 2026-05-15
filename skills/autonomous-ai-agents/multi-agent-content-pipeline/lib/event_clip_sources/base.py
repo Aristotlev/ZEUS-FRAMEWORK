@@ -120,8 +120,11 @@ def download_media(
 ) -> pathlib.Path:
     """Download media to dest_dir/source.mp4 regardless of upstream format.
 
-    - media_kind=="mp4" : streaming GET, write to disk
-    - media_kind=="hls" : ffmpeg -i master.m3u8 -c copy out.mp4 (no re-encode)
+    - media_kind=="mp4"   : streaming GET, write to disk
+    - media_kind=="hls"   : ffmpeg -i master.m3u8 -c copy out.mp4 (no re-encode)
+    - media_kind=="local" : shutil.copyfile from media_url (filesystem path)
+                            into dest_dir/source.mp4. Used by the manual-drop
+                            source — file is already on disk, no network IO.
 
     For HLS through a proxy, sets http_proxy/https_proxy in the subprocess
     env so ffmpeg's HTTP client picks it up. ffmpeg copies segments without
@@ -129,6 +132,17 @@ def download_media(
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     out_path = dest_dir / "source.mp4"
+
+    if media_kind == "local":
+        src = pathlib.Path(media_url)
+        if not src.is_file():
+            raise SourceListingError(f"local media file not found: {src}")
+        # Copy (not move) — manual source leaves the original in the inbox
+        # so the user can re-trigger by clearing the seen-DB without losing
+        # the file. ffmpeg downstream auto-detects the container by magic
+        # bytes, so renaming non-mp4 to .mp4 is harmless.
+        shutil.copyfile(src, out_path)
+        return out_path
 
     if media_kind == "mp4":
         proxies = None

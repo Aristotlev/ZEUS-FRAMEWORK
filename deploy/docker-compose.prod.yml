@@ -81,6 +81,12 @@ services:
       # on the host updates them without an image rebuild.
       - ./scripts:/opt/zeus/scripts:ro
       - ./core:/opt/zeus/core:ro
+      # Manual-drop inbox for the EVENT_CLIP pipeline. SCP videos here:
+      #   scp clip.mp4 root@<vm>:/opt/zeus/event_clip_inbox/
+      # The next hourly EVENT_CLIP cron tick picks it up, Gemini chooses
+      # the ≤90s window, Publer + Substack fan-out runs as normal.
+      # See lib/event_clip_sources/manual.py for the source impl.
+      - ./event_clip_inbox:/opt/zeus/event_clip_inbox:ro
     deploy:
       resources:
         limits:
@@ -94,11 +100,48 @@ services:
     environment:
       ZEUS_DOMAIN: ${ZEUS_DOMAIN}
       ZEUS_TRIGGER_TOKEN: ${ZEUS_TRIGGER_TOKEN}
+      # Service discovery for the browser-fetch sidecar. The lib client
+      # defaults to this URL even when the env var is unset, but making
+      # it explicit means `docker exec zeus-agent env` reflects reality.
+      ZEUS_BROWSER_FETCH_URL: http://browser-fetch:8000
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "5"
+
+  # ── browser-fetch — headless Chromium sidecar for CDN-walled sources ─────────
+  # cspan (Cloudflare 202 challenge + SPA), imf (listing CDN), senate_banking
+  # (Akamai) all 403 plain HTTP from the Hetzner IP. This service renders pages
+  # in a real Chromium and exposes POST /fetch + POST /fetch-binary on the
+  # zeus-net bridge. Internal-only, no public port. See deploy/browser-fetch/.
+  browser-fetch:
+    build:
+      context: ./deploy/browser-fetch
+      dockerfile: Dockerfile
+    image: zeus-browser-fetch:latest
+    container_name: zeus-browser-fetch
+    restart: unless-stopped
+    networks:
+      - zeus-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8000/healthz >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          # Chromium is memory-hungry. 1.5 GB covers a single context with
+          # SPA-heavy pages (cspan, banking.senate.gov). One context at a
+          # time is serialized inside server.py.
+          memory: 1536M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # ── Caddy — auto-TLS reverse proxy ───────────────────────────────────────────
   caddy:

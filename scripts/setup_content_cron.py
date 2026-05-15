@@ -203,17 +203,20 @@ def _build_jobs(niche: List[str]):
     )
 
     event_clip_slot = (
-        "Run ONE event-clip watcher pass. The script polls the gov/official "
-        "YouTube allowlist (Fed, SEC, Treasury, BLS, House FinServ, Senate "
-        "Banking, C-SPAN, IMF, ECB, BOE, BOJ — see lib/event_clip.py for the "
-        "default list), dedups against ~/.hermes/event_clip_seen.db (14-day "
-        "window), and for each unseen fresh upload: yt-dlp downloads it at "
-        "480p, ffmpeg extracts mono mp3 audio, Gemini 2.5 Flash via OpenRouter "
-        "picks the most newsworthy ≤90s window in ONE multimodal call, ffmpeg "
-        "cuts dual-AR clips (1080x1920 vertical + 1920x1080 landscape), and "
-        "the EVENT_CLIP pipeline fans out via Publer (IG/TikTok/YT Shorts get "
-        "vertical, X/LinkedIn/FB get landscape) + Substack Note. Hard caps: "
-        "1 ship/fire, 3/hr, 30/day.\n\n"
+        "Run ONE event-clip watcher pass. The script polls the first-party "
+        "source registry in lib/event_clip_sources/ — federalreserve "
+        "(Brightcove direct), imf (listing via the browser-fetch sidecar, "
+        "Brightcove media direct), cspan + senate_banking (full page render "
+        "via the browser-fetch sidecar with HLS capture), and the manual-drop "
+        "inbox at /opt/zeus/event_clip_inbox/ (scp an mp4 there for "
+        "YouTube-only orgs we can't reach automatically). Dedups against "
+        "~/.hermes/event_clip_seen.db (14-day window). For each unseen "
+        "fresh upload: ffmpeg extracts mono mp3 audio, Gemini 2.5 Flash via "
+        "OpenRouter picks the most newsworthy ≤90s window in ONE multimodal "
+        "call, ffmpeg cuts dual-AR clips (1080x1920 vertical + 1920x1080 "
+        "landscape), and the EVENT_CLIP pipeline fans out via Publer "
+        "(IG/TikTok/YT Shorts get vertical, X/LinkedIn/FB get landscape) + "
+        "Substack Note. Hard caps: 1 ship/fire, 3/hr, 30/day.\n\n"
         f"COMMAND (this is the entire task):\n"
         f"  {PYTHON} {PIPELINE}/event_clip_watch.py\n\n"
         "On exit 0: report the one-line JSON summary printed to stdout."
@@ -345,9 +348,10 @@ def _build_jobs(niche: List[str]):
             # Every hour on the hour. User-requested 2026-05-15 to ship more
             # often. The watcher dedups against ~/.hermes/event_clip_seen.db
             # so empty hours (between uploads) cost almost nothing — only
-            # the yt-dlp listing API calls, no Gemini/ffmpeg/Publer spend.
-            # Hard caps in event_clip_watch.py still gate to 1/fire so a
-            # bursty FOMC day can't blast all platforms at once.
+            # the source registry's listing calls (HTML scrape + browser-fetch
+            # render), no Gemini/ffmpeg/Publer spend. Hard caps in
+            # event_clip_watch.py still gate to 1/fire so a bursty FOMC day
+            # can't blast all platforms at once.
             "schedule": "0 * * * *",
             "prompt": event_clip_slot,
         },

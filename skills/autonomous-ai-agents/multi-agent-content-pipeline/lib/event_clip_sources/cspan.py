@@ -1,17 +1,26 @@
-"""C-SPAN.org source — scrapes homepage + parses JSON-LD VideoObject per page.
+"""C-SPAN.org source — homepage + program-page scraping via browser sidecar.
 
-C-SPAN's video catalog spans the original allowlist's house-committee /
-senate-committee / news-conference / white-house-event content and more.
-Their HLS manifest URLs are deterministic by program ID, which makes the
-extractor very stable.
+C-SPAN's video catalog spans congressional committee hearings, news
+conferences, white house events, and committee-floor sessions — exactly
+the content we lost when we dropped YouTube ingestion.
 
-Pattern:
-  1. Fetch https://www.c-span.org/ (~30 recent tiles).
-  2. Match /program/<category>/<slug>/<6+digit ID> links.
-  3. Filter to the category whitelist — drops rallies, book talks, vignettes.
-  4. For each program page, parse <script type="application/ld+json"> for
-     name / uploadDate / duration / description.
-  5. Build the HLS URL deterministically: m3u8-0.c-spanvideo.org/program/program.<ID>.tsc.m3u8
+Why we can't use plain HTTP here:
+  - c-span.org gates a fraction of cold-IP requests through a Cloudflare
+    202 challenge interstitial that requests/curl can't solve.
+  - Program pages are SPA-rendered; the JSON-LD <script> tags only
+    populate after JS executes, so a static HTML pull returns the
+    template placeholders, not the real VideoObject.
+
+The deploy/browser-fetch sidecar (headless Chromium on zeus-net) renders
+each page, then returns the post-hydration HTML. We then do the same
+JSON-LD parse we did before.
+
+Media URL: c-span's HLS manifest follows a deterministic pattern at
+m3u8-0.c-spanvideo.org/program/program.<ID>.tsc.m3u8. CloudFront *may*
+require a signed token; ffmpeg's plain GET will surface 403 if so, which
+the watcher records as a `skipped:download_failed` ledger row. If that
+becomes the steady-state outcome in prod, we route media through the
+sidecar's /fetch-binary endpoint with the program page primed as referer.
 """
 from __future__ import annotations
 
@@ -21,18 +30,21 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from . import _browser
 from .base import (
     SourceListingError,
     UploadCandidate,
     VideoSource,
-    http_get,
     register,
 )
 
 log = logging.getLogger("zeus.event_clip.sources.cspan")
 
+HOME_URL = "https://www.c-span.org/"
+
 # Categories that produce newsworthy soundbites. Everything else (campaign
-# rallies, book talks, history vignettes) is excluded.
+# rallies, book talks, history vignettes, washington-journal call-in
+# segments) is excluded.
 _CATEGORY_WHITELIST: set[str] = {
     "house-committee",
     "senate-committee",
@@ -78,28 +90,51 @@ def _parse_iso_duration(s: str) -> int:
     return int(h * 3600 + mn * 60 + sec)
 
 
+def _extract_video_meta(html: str) -> Optional[dict]:
+    """Find the VideoObject JSON-LD block on a rendered program page."""
+    for jm in _JSONLD_RE.finditer(html):
+        blob = jm.group(1).strip()
+        try:
+            data = json.loads(blob)
+        except json.JSONDecodeError:
+            continue
+        candidates = [data] if isinstance(data, dict) else []
+        graph = (data.get("@graph") if isinstance(data, dict) else None) or []
+        candidates.extend(graph)
+        video = next(
+            (c for c in candidates if isinstance(c, dict)
+             and c.get("@type") == "VideoObject"),
+            None,
+        )
+        if not video:
+            continue
+        return {
+            "title": (video.get("name") or "").strip(),
+            "uploaded_at": _parse_iso8601(video.get("uploadDate") or ""),
+            "duration_s": _parse_iso_duration(video.get("duration") or ""),
+        }
+    return None
+
+
 class CSpanSource(VideoSource):
     source_id = "cspan"
     display_name = "C-SPAN"
-    home_url = "https://www.c-span.org/"
+    home_url = HOME_URL
 
     def list_recent(self, *, hours_back: int) -> list[UploadCandidate]:
-        try:
-            r = http_get(self.home_url, timeout=20)
-            if r.status_code == 403:
-                # CSPAN sometimes hits Cloudflare friction on first req from
-                # a cold IP. One retry with picker proxy clears it.
-                r = http_get(self.home_url, use_proxy=True, timeout=20)
-            r.raise_for_status()
-            html = r.text
-        except Exception as exc:
-            log.warning("c-span homepage fetch failed: %s", exc)
+        if not _browser.is_available():
+            log.info("cspan: browser-fetch sidecar unavailable — returning []")
+            return []
+
+        home = _browser.fetch_page(HOME_URL, wait_seconds=2.0)
+        if home is None or home.status >= 400 or not home.html:
+            log.info("cspan: homepage fetch via sidecar failed")
             return []
 
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
         seen: set[str] = set()
-        results: list[UploadCandidate] = []
-        for m in _PROGRAM_LINK_RE.finditer(html):
+        candidate_links: list[tuple[str, str]] = []  # (program_id, page_url)
+        for m in _PROGRAM_LINK_RE.finditer(home.html):
             category = m.group(1).lower()
             program_id = m.group(2)
             if category not in _CATEGORY_WHITELIST:
@@ -108,22 +143,29 @@ class CSpanSource(VideoSource):
                 continue
             seen.add(program_id)
 
-            # We need the page's exact slug to construct the canonical URL,
-            # so capture the full match path from the source HTML.
             link_match = re.search(
                 rf'/program/{re.escape(category)}/[a-z0-9\-]+/{program_id}\b',
-                html, re.I,
+                home.html, re.I,
             )
             if not link_match:
                 continue
             page_url = f"https://www.c-span.org{link_match.group(0)}"
+            candidate_links.append((program_id, page_url))
+            # Cap to avoid hammering the sidecar — most homepage scrapes
+            # surface 20-30 program links; we only need the freshest few.
+            if len(candidate_links) >= 12:
+                break
 
+        results: list[UploadCandidate] = []
+        for program_id, page_url in candidate_links:
             try:
-                meta = self._fetch_program_meta(page_url, program_id)
+                meta = self._fetch_program_meta(page_url)
             except Exception as exc:
                 log.warning(
-                    "c-span program %s meta fetch failed: %s", program_id, exc,
+                    "cspan program %s meta fetch failed: %s", program_id, exc,
                 )
+                continue
+            if not meta:
                 continue
 
             uploaded_at = meta.get("uploaded_at")
@@ -143,44 +185,25 @@ class CSpanSource(VideoSource):
                 ),
                 media_kind="hls",
             ))
-            if len(results) >= 10:
+            if len(results) >= 5:
                 break
         return results
 
-    def _fetch_program_meta(self, page_url: str, program_id: str) -> dict:
-        r = http_get(page_url, timeout=20)
-        if r.status_code != 200:
-            raise SourceListingError(f"program page {r.status_code}")
-        html = r.text
-
-        # Parse every embedded JSON-LD block; the VideoObject is one of them.
-        for jm in _JSONLD_RE.finditer(html):
-            blob = jm.group(1).strip()
-            try:
-                data = json.loads(blob)
-            except json.JSONDecodeError:
-                continue
-            # Some pages emit a graph with @type: VideoObject inside; handle
-            # both bare-VideoObject and @graph variants.
-            candidates = [data] if isinstance(data, dict) else []
-            graph = (data.get("@graph") if isinstance(data, dict) else None) or []
-            candidates.extend(graph)
-            video = next(
-                (c for c in candidates if isinstance(c, dict)
-                 and c.get("@type") == "VideoObject"),
-                None,
-            )
-            if not video:
-                continue
-            return {
-                "title": (video.get("name") or "").strip(),
-                "uploaded_at": _parse_iso8601(video.get("uploadDate") or ""),
-                "duration_s": _parse_iso_duration(video.get("duration") or ""),
-            }
-
-        raise SourceListingError(
-            f"no VideoObject JSON-LD on program/{program_id}"
+    def _fetch_program_meta(self, page_url: str) -> Optional[dict]:
+        fr = _browser.fetch_page(
+            page_url,
+            # Wait for the player init to inject the VideoObject JSON-LD.
+            wait_for_selector='script[type="application/ld+json"]',
+            wait_seconds=1.0,
         )
+        if fr is None:
+            return None
+        if fr.status >= 400 or not fr.html:
+            raise SourceListingError(f"program page {fr.status}")
+        meta = _extract_video_meta(fr.html)
+        if not meta:
+            raise SourceListingError("no VideoObject JSON-LD on page")
+        return meta
 
 
 CSPAN_SOURCE = register(CSpanSource())
