@@ -2150,19 +2150,69 @@ _PUBLER_UPLOAD_RETRY_DELAYS_S = [30, 90]
 # piece for out-of-process retry via the publish watcher.
 _PUBLER_UPLOAD_RETRY_DELAYS_S_LONG_ARTICLE = [30, 60, 90, 120]
 
+# PNG chunks Publer's image parser handles cleanly. Anything else (C2PA caBX
+# from GPT Image 2, tEXt/iTXt metadata, etc.) is stripped before upload —
+# Publer's /media endpoint started returning 400
+# "The provided input is not a publicly accessible media, or we cannot
+# download it on our servers" on PNGs containing the caBX chunk
+# (verified 2026-05-15: stripping caBX flipped the same image from 400 to
+# 200). GPT Image 2 embeds caBX (C2PA content credentials, AI provenance)
+# in every render, so without this filter every LONG_ARTICLE image upload
+# 400s and the post ships without an image.
+_PNG_ALLOWED_CHUNKS = {
+    b"IHDR", b"IDAT", b"IEND", b"PLTE", b"tRNS",
+    b"sRGB", b"gAMA", b"pHYs", b"cHRM", b"iCCP",
+}
+
+
+def _strip_png_metadata(data: bytes) -> bytes:
+    """Drop non-essential PNG chunks (notably caBX from GPT Image 2's C2PA
+    provenance block) that break Publer's /media parser. Stdlib only — runs
+    on every Publer upload, so no PIL/ImageMagick dependency.
+
+    Idempotent: returns input unchanged if it isn't a PNG, or if every chunk
+    is already in the allowlist.
+    """
+    import struct
+    if len(data) < 8 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        return data  # not a PNG (JPEG / WebP / video) — pass through
+    out = bytearray(data[:8])
+    i = 8
+    dropped: list[str] = []
+    while i + 12 <= len(data):
+        (length,) = struct.unpack(">I", data[i:i+4])
+        ctype = data[i+4:i+8]
+        end = i + 8 + length + 4
+        if end > len(data):
+            # Malformed chunk — bail and return original bytes; let Publer's
+            # parser surface the real error instead of silently corrupting.
+            return data
+        if ctype in _PNG_ALLOWED_CHUNKS:
+            out += data[i:end]
+        else:
+            dropped.append(ctype.decode("ascii", errors="replace"))
+        i = end
+    if dropped:
+        log.info(f"  publer upload: stripped non-essential PNG chunks {dropped} (size {len(data)} -> {len(out)})")
+    return bytes(out)
+
 
 def _publer_upload(local_path: str, mime: str, retry_delays: list[int] | None = None) -> str:
     delays = retry_delays if retry_delays is not None else _PUBLER_UPLOAD_RETRY_DELAYS_S
     last_status = 0
     last_body = ""
+    # Read + sanitize once; bytes are reused for every retry attempt. PNG
+    # chunk-stripping removes the C2PA caBX block that GPT Image 2 embeds
+    # (see _strip_png_metadata); without this, every LONG_ARTICLE upload 400s.
+    raw_bytes = open(local_path, "rb").read()
+    payload_bytes = _strip_png_metadata(raw_bytes) if mime == "image/png" else raw_bytes
     for attempt in range(len(delays) + 1):
-        with open(local_path, "rb") as fh:
-            r = requests.post(
-                f"{PUBLER_BASE}/media",
-                headers=_publer_headers(json_body=False),
-                files={"file": (os.path.basename(local_path), fh, mime)},
-                timeout=120,
-            )
+        r = requests.post(
+            f"{PUBLER_BASE}/media",
+            headers=_publer_headers(json_body=False),
+            files={"file": (os.path.basename(local_path), payload_bytes, mime)},
+            timeout=120,
+        )
         if r.status_code == 200:
             return r.json()["id"]
         last_status, last_body = r.status_code, r.text[:300]
