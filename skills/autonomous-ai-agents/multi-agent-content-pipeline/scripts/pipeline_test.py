@@ -236,16 +236,30 @@ else:
 # JSON-LD datePublished, (c) aren't behind a hard paywall. Skipped:
 # theinformation.com / foreignpolicy.com (paywalled), semianalysis.com
 # (Substack, no consistent pub-date metadata).
+#
+# Re-audit (2026-05-16): the 08:00 UTC long_article slot burned $0.04 then
+# died — picker landed on finance.yahoo.com twice in a row and the verifier
+# couldn't extract published_time from the article HTML, then crypto/stocks
+# returned nothing in-allowlist. Re-probed every finance/stocks/crypto host
+# from the prod VM (3x each, with the verifier's exact UA/headers):
+#   - coindesk.com  → 429 (3/3). 18 historical wins; rate-limited now from
+#     Hetzner. Dropping — picker keeps landing on it and verifier 4xxs.
+#   - blockworks.co → 403 (3/3). Never picked. Dropping.
+#   - finextra.com  → 403 (3/3). Never picked. Dropping.
+#   - finance.yahoo.com → 200 on homepage but article pages flake (saw a 500
+#     on /news/ mid-probe) AND today's verifier rejected 2 Yahoo article URLs
+#     for missing published_time meta. Only historical win was via the `ca.`
+#     subhost (1×). Dropping from finance + stocks to stop the slot-burn.
 DEFAULT_SOURCES_BY_NICHE: dict[str, list[str]] = {
     "finance": [
-        "finance.yahoo.com", "ft.com", "marketwatch.com",
+        "ft.com", "marketwatch.com",
         "businessinsider.com", "fortune.com", "axios.com",
         "investing.com", "barrons.com",
-        "pymnts.com", "finextra.com",
+        "pymnts.com",
         "unusualwhales.com",
     ],
     "stocks": [
-        "finance.yahoo.com", "marketwatch.com", "seekingalpha.com",
+        "marketwatch.com", "seekingalpha.com",
         "businessinsider.com", "investing.com", "fortune.com",
         "barrons.com",
         "benzinga.com", "nasdaq.com",
@@ -258,8 +272,8 @@ DEFAULT_SOURCES_BY_NICHE: dict[str, list[str]] = {
         "unusualwhales.com",
     ],
     "crypto": [
-        "coindesk.com", "decrypt.co", "cointelegraph.com",
-        "bitcoinmagazine.com", "cryptoslate.com", "blockworks.co",
+        "decrypt.co", "cointelegraph.com",
+        "bitcoinmagazine.com", "cryptoslate.com",
         "dlnews.com",
         "unusualwhales.com",
     ],
