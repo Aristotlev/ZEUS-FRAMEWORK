@@ -360,7 +360,18 @@ def publish_note(body: str) -> str:
         "paragraphs": paragraphs,
     })
 
-    env = {**os.environ, "NODE_PATH": _NODE_MODULES_PATH}
+    # PLAYWRIGHT_BROWSERS_PATH: hardcoded fallback because Hermes execute_code
+    # strips category=tool env keys from cron-fired subprocesses (same blocklist
+    # that bit TAVILY). Without this, the node child falls back to
+    # $HOME/.cache/ms-playwright/... where nothing is installed, and every
+    # ARTICLE → Substack Note silently fails with "Executable doesn't exist".
+    env = {
+        **os.environ,
+        "NODE_PATH": _NODE_MODULES_PATH,
+        "PLAYWRIGHT_BROWSERS_PATH": os.environ.get(
+            "PLAYWRIGHT_BROWSERS_PATH", "/opt/hermes/.playwright"
+        ),
+    }
     try:
         proc = subprocess.run(
             ["node", _NOTE_BROWSER_SCRIPT],

@@ -390,6 +390,32 @@ def _has_pending_upload(piece: ContentPiece) -> bool:
     return False
 
 
+def _has_publer_schedule_429(piece: ContentPiece) -> bool:
+    """True if any Publer platform was rejected by /posts/schedule with a 429
+    or 5xx — a transient Publer-side failure that should be retried, same as
+    PENDING_UPLOAD. Distinct from PENDING_UPLOAD (which is /media-side) so
+    text-only ARTICLE pieces — which never touch /media — also recover.
+
+    Surfaced 2026-05-16: two ARTICLE rows (10:15 + 10:30 UTC) hit a workspace
+    429 on /posts/schedule across fb/tw/li simultaneously. Every job_id was
+    "FAILED: Publer schedule failed 429: ..." — no PENDING_UPLOAD prefix, so
+    the watcher waited 24h then bailed in _retry_publish on the has_local
+    check (ARTICLE = no media). Silent loss, no email (ARTICLE doesn't email).
+    """
+    for plat in piece.target_platforms:
+        if plat == "substack":
+            continue
+        jid = str(piece.publer_job_ids.get(plat, ""))
+        if not jid.startswith("FAILED"):
+            continue
+        if "Publer schedule failed" in jid and (
+            " 429" in jid or " 500" in jid or " 502" in jid
+            or " 503" in jid or " 504" in jid
+        ):
+            return True
+    return False
+
+
 def _final_status(states: dict[str, str], piece: ContentPiece, past_deadline: bool) -> str:
     confirmed = [p for p, s in states.items() if s == "live"]
     failed = [p for p, s in states.items() if s == "failed"]
@@ -402,7 +428,7 @@ def _final_status(states: dict[str, str], piece: ContentPiece, past_deadline: bo
     # as "partial" the moment Substack comes back live and never retries the
     # Publer fan-out. Treat it as failed-needing-retry whenever Publer
     # platforms specifically haven't landed.
-    if _has_pending_upload(piece):
+    if _has_pending_upload(piece) or _has_publer_schedule_429(piece):
         publer_confirmed = [p for p in confirmed if p != "substack"]
         if not publer_confirmed and not pending:
             return "failed"
@@ -457,7 +483,12 @@ def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:
     # counter keys so a Publer outage doesn't burn the 3-attempt cap meant
     # for misconfig detection.
     pending_upload = _has_pending_upload(piece)
-    if pending_upload:
+    schedule_429 = _has_publer_schedule_429(piece)
+    # Both PENDING_UPLOAD (/media 429) and schedule 429 are transient
+    # Publer-side outages, not misconfig — use the higher retry cap and the
+    # separate upload counter so a Publer rate-limit window doesn't burn the
+    # 3-attempt cap reserved for permanent failures (bad account ID, etc).
+    if pending_upload or schedule_429:
         counter_key = "upload_retry_count"
         cap = PENDING_UPLOAD_MAX_RETRIES
     else:
@@ -465,9 +496,9 @@ def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:
         cap = MAX_PUBLISH_RETRIES
     attempts = int(meta.get(counter_key) or 0)
     if attempts >= cap:
+        reason = "PENDING_UPLOAD" if pending_upload else ("Publer 429 schedule" if schedule_429 else "all platforms failed")
         log.warning(
-            f"  run={piece.run_id} {'PENDING_UPLOAD' if pending_upload else 'all platforms failed'} "
-            f"and retry cap ({cap}) reached -- giving up"
+            f"  run={piece.run_id} {reason} and retry cap ({cap}) reached -- giving up"
         )
         return False
     # Idempotency guard: distinguish "Publer rejected the schedule"
@@ -516,10 +547,17 @@ def _retry_publish(piece: ContentPiece, row: dict, meta: dict) -> bool:
                     return False
             except Exception:
                 pass  # snippet check is best-effort; fall through to retry
+    # has_local only matters if the piece ORIGINALLY had media. Text-only
+    # pieces (ARTICLE / Flash News) ship via type="status" with no /media
+    # call, so there's nothing to re-upload — _publer_schedule just needs to
+    # call /posts/schedule again with the same text. Pre-2026-05-17 this
+    # check unconditionally killed ARTICLE retries → silent loss whenever
+    # Publer 429'd the schedule endpoint.
+    had_media = bool(piece.images) or bool(piece.video)
     has_local = any(getattr(img, "local_path", None) for img in piece.images) or (
         piece.video and getattr(piece.video, "local_path", None)
     )
-    if not has_local:
+    if had_media and not has_local:
         log.warning(
             f"  run={piece.run_id} all platforms failed but no local "
             f"artifact to re-upload -- giving up"
